@@ -296,7 +296,8 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
         }
 
         override fun onVisibilityChanged(visible: Boolean) {
-            renderController.visible = visible
+            // David: Hack to enable rendering while in the background
+            renderController.visible = true
         }
 
         override fun onOffsetsChanged(
@@ -413,9 +414,7 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
         }
 
         override fun requestRender() {
-            if (renderController.visible) {
-                super.requestRender()
-            }
+            super.requestRender()
         }
 
         override fun queueEventOnGlThread(event: () -> Unit) {
