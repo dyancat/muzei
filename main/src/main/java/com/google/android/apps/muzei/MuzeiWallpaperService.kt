@@ -275,7 +275,23 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
 
         fun lockScreenVisibleChanged(isLockScreenVisible: Boolean) {
             if (!EffectsLockScreenOpen.value) {
-                renderController.onLockScreen = isLockScreenVisible
+                /**
+                 * TODO: I don't personally use any lock screen changes for Muzei so this can be safely disabled
+                 * When this is enabled, it glitches any wallpaper changes that happen after the screen is unlocked and the home screen is not displayed
+                 * What I think happens is:
+                 *
+                 * - When the screen is unlocked, this lockscreen visibility changes to false, when triggers reloadCurrentArtwork inside the onLockScreen setter
+                 * - reloadCurrentArtwork calls renderer.setAndConsumeImageLoader, but assumes the Muzei is still visible because it WAS visible while on the lock screen
+                 * - so the immediate flag is set to false, so it tries to crossfade to the new image (e.g. unblurring the image over time)
+                 * - However the crossfade never completes because it doesn't tick while Muzei is not visible
+                 * - The crossFadeAnimator is stuck executing
+                 * - Now if the wallpaper is changed while Muzei is still in the background, this change is queued to happen after this stuck crossFadeAnimator
+                 * - When Muzei resumes, it first finishes the original crossFadeAnimator.
+                 * - There is a bug where the onEnd of the animator will start the next cross fade and set the instance fields up with the next artwork.
+                 * - But then in the same frame, it will continue the onDrawFrame function, which renders the current artwork (which was just updated) with the final value of the cross fade
+                 * - Then it executes the queued one which restarts the cross fade from the beginning
+                 */
+                  renderController.onLockScreen = isLockScreenVisible
             }
         }
 

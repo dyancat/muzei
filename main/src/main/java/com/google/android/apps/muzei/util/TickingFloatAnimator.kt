@@ -51,9 +51,9 @@ class TickingFloatAnimator(private val duration: Int) {
         }
     }
 
-    fun tick(): Boolean {
+    fun tick(): Pair<Boolean, (() -> Unit)?> {
         if (!isRunning) {
-            return false
+            return Pair(false, null)
         }
 
         val t = min((SystemClock.elapsedRealtime() - startTime).toFloat() / duration, 1f)
@@ -62,8 +62,9 @@ class TickingFloatAnimator(private val duration: Int) {
         currentValue = if (isRunning) {
             startValue + interpolator.getInterpolation(t) * (endValue - startValue)
         } else {
-            endValue.toFloat().also { onEnd() }
+            endValue.toFloat()
         }
-        return isRunning
+
+        return Pair(isRunning, if (!isRunning) onEnd else null)
     }
 }
