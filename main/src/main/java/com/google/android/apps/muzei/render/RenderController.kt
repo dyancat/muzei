@@ -64,7 +64,9 @@ abstract class RenderController(
                 renderer.recomputeGreyAmount(
                         if (value) Prefs.PREF_LOCK_GREY_AMOUNT else Prefs.PREF_GREY_AMOUNT)
                 // Switch immediately if we're transitioning to the lock screen
-                reloadCurrentArtwork(if (value) ReloadImmediate else ReloadDespiteInvisible)
+                // David: Hack to always enable cross fade
+                // reloadCurrentArtwork(if (value) ReloadImmediate else ReloadDespiteInvisible)
+                reloadCurrentArtwork(ReloadDespiteInvisible)
             }
         }
     private lateinit var coroutineScope: CoroutineScope
@@ -141,8 +143,7 @@ abstract class RenderController(
 
             callbacks.queueEventOnGlThread {
                 if (visible || reloadType != ReloadWhenVisible) {
-                    renderer.setAndConsumeImageLoader(imageLoader,
-                    reloadType == ReloadImmediate || !visible)
+                    renderer.setAndConsumeImageLoader(imageLoader, reloadType == ReloadImmediate || !visible)
                 } else {
                     queuedImageLoader = imageLoader
                 }
