@@ -243,6 +243,9 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
 
         @RequiresApi(Build.VERSION_CODES.O_MR1)
         private suspend fun updateCurrentArtwork(artwork: Artwork) {
+            return;
+            // When switching Artwork this ImageLoader.decode seems to interfere with the decode happening in MuzeiBlurRenderer.setAndConsumeImageLoader
+            // Something then triggers MuzeiBlurRenderer.onViewportChanged with xOffset as 0.0f which flickers the wallpaper position
             val image = ImageLoader.decode(
                     contentResolver, artwork.contentUri,
                     MAX_ARTWORK_SIZE / 2) ?: return

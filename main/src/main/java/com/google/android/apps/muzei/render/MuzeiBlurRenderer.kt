@@ -259,6 +259,10 @@ class MuzeiBlurRenderer(
     }
 
     private fun onViewportChanged() {
+//        if(normalOffsetX == 0.0f) {
+              // Sometimes the offset gets set to 0, even when it should be 1, when switching artwork
+//            Log.d("David", "onViewportChanged, offset: $normalOffsetX, zoom: $zoomAmount");
+//        }
         currentGLPictureSet.recomputeTransformMatrices()
         nextGLPictureSet.recomputeTransformMatrices()
         if (surfaceCreated) {
