@@ -218,7 +218,7 @@ class MuzeiBlurRenderer(
 
         Matrix.setIdentityM(modelMatrix, 0)
 
-        val (stillCrossFadeAnimating, onCrossFadeEnd) = crossfadeAnimator.tick();
+        val (stillCrossFadeAnimating, onCrossFadeEnd) = crossfadeAnimator.tick()
         val (stillBlurAnimating, onBlurEnd) = blurAnimator.tick()
         val stillAnimating = stillCrossFadeAnimating or stillBlurAnimating
 
@@ -242,9 +242,11 @@ class MuzeiBlurRenderer(
             callbacks.requestRender()
         }
 
+        // Run any animator end-callbacks only after the final frame has been drawn.
+        // crossfadeAnimator's onEnd swaps the current/next picture sets, so invoking it
+        // before drawing would render the swapped-in artwork a frame too early and flicker.
         onCrossFadeEnd?.invoke()
         onBlurEnd?.invoke()
-
     }
 
     @Keep

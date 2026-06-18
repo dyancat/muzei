@@ -51,6 +51,14 @@ class TickingFloatAnimator(private val duration: Int) {
         }
     }
 
+    /**
+     * Advances the animation to the current time.
+     *
+     * @return a pair of the running state and, only on the tick where the animation
+     * just finished, its [onEnd] callback (null otherwise). The caller must invoke the
+     * returned callback *after* drawing the final frame, since [onEnd] may mutate state
+     * that would otherwise be rendered a frame too early.
+     */
     fun tick(): Pair<Boolean, (() -> Unit)?> {
         if (!isRunning) {
             return Pair(false, null)
