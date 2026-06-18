@@ -23,6 +23,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Bitmap
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
@@ -82,7 +83,12 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
     companion object {
         private const val TEMPORARY_FOCUS_DURATION_MILLIS: Long = 3000
         private const val THREE_FINGER_TAP_INTERVAL_MS = 1000L
-        private const val MAX_ARTWORK_SIZE = 110 // px
+        // Resolution we decode the artwork at to extract colours. Larger than WallpaperColors
+        // strictly needs (~112px) so the thin status-bar strip we crop out still has some
+        // vertical resolution to average over.
+        private const val COLOR_DECODE_SIZE = 256 // px
+        // Fallback status bar height if the platform dimen can't be resolved.
+        private const val DEFAULT_STATUS_BAR_HEIGHT_DP = 24f
     }
 
     private val wallpaperLifecycle = LifecycleRegistry(this)
@@ -153,6 +159,8 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
         private lateinit var renderer: MuzeiBlurRenderer
         private lateinit var renderController: RenderController
         private var currentArtworkColors: WallpaperColors? = null
+        // notifyColorsChanged() is only called while the surface is hidden (so the launcher's
+        // offset re-push isn't visible); a change made while visible waits here until it next hides.
         private var surfaceVisible = false
         private var pendingColorsChanged = false
 
@@ -252,22 +260,51 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
 
         @RequiresApi(Build.VERSION_CODES.O_MR1)
         private suspend fun updateCurrentArtwork(artwork: Artwork) {
-            val image = ImageLoader.decode(
-                    contentResolver, artwork.contentUri,
-                    MAX_ARTWORK_SIZE / 2) ?: return
+            val stripFraction = statusBarStripFraction()
             currentArtworkColors = withContext(Dispatchers.IO) {
-                WallpaperColors.fromBitmap(image)
-            }
-            // notifyColorsChanged() makes the host (launcher/SystemUI) re-query the engine,
-            // and some hosts respond by re-delivering onOffsetsChanged with a spurious xOffset
-            // of 0, which shifts the wallpaper for a frame. Only notify while the surface is
-            // hidden: the glitchy offset re-delivery then isn't visible, and the host sends the
-            // correct offset again when the wallpaper is next shown. Until then the cached
-            // colours are still served on demand via onComputeColors.
+                val image = ImageLoader.decode(
+                        contentResolver, artwork.contentUri, COLOR_DECODE_SIZE)
+                        ?: return@withContext null
+                // Derive WallpaperColors — and in particular the HINT_SUPPORTS_DARK_TEXT flag
+                // that drives the status bar icon colour — from just the strip of the artwork
+                // sitting below the status bar, rather than the whole image. The artwork is
+                // cover-fit, so the top of the image lines up with the top of the screen.
+                val stripHeight = (image.height * stripFraction).toInt().coerceIn(1, image.height)
+                val strip = Bitmap.createBitmap(image, 0, 0, image.width, stripHeight)
+                WallpaperColors.fromBitmap(strip).also {
+                    if (strip != image) strip.recycle()
+                    image.recycle()
+                }
+            } ?: return
+            // The launcher reacts to notifyColorsChanged() by re-pushing wallpaper offsets — a
+            // visible jump we can't filter out. So only notify while the surface is hidden (screen
+            // off / another app), where that re-push isn't seen; otherwise defer until it next
+            // hides. The cached colours are served on demand via onComputeColors meanwhile.
             if (surfaceVisible) {
                 pendingColorsChanged = true
             } else {
                 notifyColorsChanged()
+            }
+        }
+
+        /**
+         * Fraction of the wallpaper height occupied by the status bar, used to crop the strip
+         * of artwork whose luminance decides the status bar icon colour.
+         */
+        private fun statusBarStripFraction(): Float {
+            val res = resources
+            val resId = res.getIdentifier("status_bar_height", "dimen", "android")
+            val statusBarHeight = if (resId > 0) {
+                res.getDimensionPixelSize(resId)
+            } else {
+                (DEFAULT_STATUS_BAR_HEIGHT_DP * res.displayMetrics.density).toInt()
+            }
+            val screenHeight = WallpaperSizeStateFlow.value?.height
+                    ?: res.displayMetrics.heightPixels
+            return if (screenHeight > 0) {
+                (statusBarHeight.toFloat() / screenHeight).coerceIn(0.01f, 0.5f)
+            } else {
+                0.05f
             }
         }
 
@@ -314,8 +351,8 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
 
             surfaceVisible = visible
             if (!visible && pendingColorsChanged) {
-                // Flush a deferred colours update now that the offset re-delivery it can
-                // trigger won't be visible (see updateCurrentArtwork).
+                // Flush a deferred colours update now that the launcher's offset re-push it
+                // triggers won't be visible (see updateCurrentArtwork).
                 pendingColorsChanged = false
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
                     notifyColorsChanged()
