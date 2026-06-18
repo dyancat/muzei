@@ -280,9 +280,10 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
             } ?: return
             // The launcher reacts to notifyColorsChanged() by re-pushing wallpaper offsets — a
             // visible jump we can't filter out — but only while it's hosting the visible home
-            // wallpaper. Defer only in that case; while hidden, or while the lock screen (keyguard)
-            // is hosting, it's safe to notify now. Deferred updates flush in flushPendingColors().
-            if (surfaceVisible && !lockScreenVisible) {
+            // wallpaper. That's the case only when the surface is visible, not on the lock screen
+            // (keyguard hosts), and not with the Muzei app foreground (its window hosts via
+            // windowShowWallpaper). In every other state it's safe to notify now.
+            if (surfaceVisible && !lockScreenVisible && !MuzeiActivityVisible.value) {
                 pendingColorsChanged = true
             } else {
                 notifyColorsChanged()
