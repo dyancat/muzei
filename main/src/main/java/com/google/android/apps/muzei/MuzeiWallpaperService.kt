@@ -153,6 +153,8 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
         private lateinit var renderer: MuzeiBlurRenderer
         private lateinit var renderController: RenderController
         private var currentArtworkColors: WallpaperColors? = null
+        private var surfaceVisible = false
+        private var pendingColorsChanged = false
 
         private var validDoubleTap: Boolean = false
         private var lastThreeFingerTap = 0L
@@ -250,16 +252,23 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
 
         @RequiresApi(Build.VERSION_CODES.O_MR1)
         private suspend fun updateCurrentArtwork(artwork: Artwork) {
-            return;
-            // When switching Artwork this ImageLoader.decode seems to interfere with the decode happening in MuzeiBlurRenderer.setAndConsumeImageLoader
-            // Something then triggers MuzeiBlurRenderer.onViewportChanged with xOffset as 0.0f which flickers the wallpaper position
             val image = ImageLoader.decode(
                     contentResolver, artwork.contentUri,
                     MAX_ARTWORK_SIZE / 2) ?: return
             currentArtworkColors = withContext(Dispatchers.IO) {
                 WallpaperColors.fromBitmap(image)
             }
-            notifyColorsChanged()
+            // notifyColorsChanged() makes the host (launcher/SystemUI) re-query the engine,
+            // and some hosts respond by re-delivering onOffsetsChanged with a spurious xOffset
+            // of 0, which shifts the wallpaper for a frame. Only notify while the surface is
+            // hidden: the glitchy offset re-delivery then isn't visible, and the host sends the
+            // correct offset again when the wallpaper is next shown. Until then the cached
+            // colours are still served on demand via onComputeColors.
+            if (surfaceVisible) {
+                pendingColorsChanged = true
+            } else {
+                notifyColorsChanged()
+            }
         }
 
         @RequiresApi(Build.VERSION_CODES.O_MR1)
@@ -302,6 +311,16 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
             // RENDERMODE_WHEN_DIRTY means this only costs frames while an animation is actually
             // running — an idle background wallpaper still doesn't render.
             renderController.visible = true
+
+            surfaceVisible = visible
+            if (!visible && pendingColorsChanged) {
+                // Flush a deferred colours update now that the offset re-delivery it can
+                // trigger won't be visible (see updateCurrentArtwork).
+                pendingColorsChanged = false
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                    notifyColorsChanged()
+                }
+            }
         }
 
         override fun onOffsetsChanged(
