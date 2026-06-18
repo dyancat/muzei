@@ -95,7 +95,7 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
         // non-tunable internal calculation. Same metric the framework uses, where its (stricter,
         // also dark-pixel-guarded) threshold is ~0.70. Higher => dark icons only over brighter
         // artwork. (Only applied on API 31+, where the WallpaperColors hint can be set explicitly.)
-        private const val STATUS_BAR_DARK_ICON_MIN_LUMINANCE = 0.5f
+        private const val STATUS_BAR_DARK_ICON_MIN_LUMINANCE = 0.42f
     }
 
     private val wallpaperLifecycle = LifecycleRegistry(this)
