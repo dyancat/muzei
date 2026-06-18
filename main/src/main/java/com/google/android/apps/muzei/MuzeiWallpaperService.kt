@@ -306,7 +306,12 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
         }
 
         override fun onVisibilityChanged(visible: Boolean) {
-            // David: Hack to enable rendering while in the background
+            // Keep the renderer "visible" regardless of the actual surface visibility so that
+            // in-flight crossfade/blur animations keep ticking to completion even while Muzei
+            // is in the background (e.g. behind the lock screen or another app). Without this,
+            // a transition started off-screen stalls and flickers when Muzei next resumes.
+            // RENDERMODE_WHEN_DIRTY means this only costs frames while an animation is actually
+            // running — an idle background wallpaper still doesn't render.
             renderController.visible = true
         }
 
@@ -425,10 +430,6 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
                     renderer.setIsBlurred(isBlurred = true, artDetailMode = false)
                 }
             }
-        }
-
-        override fun requestRender() {
-            super.requestRender()
         }
 
         override fun queueEventOnGlThread(event: () -> Unit) {
