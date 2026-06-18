@@ -63,9 +63,10 @@ abstract class RenderController(
                         if (value) Prefs.PREF_LOCK_DIM_AMOUNT else Prefs.PREF_DIM_AMOUNT)
                 renderer.recomputeGreyAmount(
                         if (value) Prefs.PREF_LOCK_GREY_AMOUNT else Prefs.PREF_GREY_AMOUNT)
-                // Switch immediately if we're transitioning to the lock screen
-                // David: Hack to always enable cross fade
-                // reloadCurrentArtwork(if (value) ReloadImmediate else ReloadDespiteInvisible)
+                // Always crossfade between the home- and lock-screen variants rather than
+                // switching instantly. ReloadDespiteInvisible keeps the transition running
+                // even when Muzei isn't the visible surface, which works because the engine
+                // keeps rendering in the background (see MuzeiWallpaperEngine.onVisibilityChanged).
                 reloadCurrentArtwork(ReloadDespiteInvisible)
             }
         }
