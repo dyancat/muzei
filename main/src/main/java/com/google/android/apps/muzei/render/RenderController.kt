@@ -18,8 +18,6 @@ package com.google.android.apps.muzei.render
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.os.Handler
-import android.os.Looper
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.lifecycleScope
@@ -63,11 +61,11 @@ abstract class RenderController(
                         if (value) Prefs.PREF_LOCK_DIM_AMOUNT else Prefs.PREF_DIM_AMOUNT)
                 renderer.recomputeGreyAmount(
                         if (value) Prefs.PREF_LOCK_GREY_AMOUNT else Prefs.PREF_GREY_AMOUNT)
-                // Always crossfade between the home- and lock-screen variants rather than
-                // switching instantly. ReloadDespiteInvisible keeps the transition running
-                // even when Muzei isn't the visible surface, which works because the engine
-                // keeps rendering in the background (see MuzeiWallpaperEngine.onVisibilityChanged).
-                reloadCurrentArtwork(ReloadDespiteInvisible)
+                // The GPU blur reads the blur/dim/grey amounts live and onDrawFrame eases the
+                // effective values toward the new targets, so the home<->lock transition animates
+                // without re-decoding the artwork. Just kick a render to start the easing; it keeps
+                // running in the background (see MuzeiWallpaperEngine.onVisibilityChanged).
+                callbacks.requestRender()
             }
         }
     private lateinit var coroutineScope: CoroutineScope
@@ -78,39 +76,32 @@ abstract class RenderController(
             when (key) {
                 Prefs.PREF_LOCK_BLUR_AMOUNT -> {
                     renderer.recomputeMaxPrescaledBlurPixels()
-                    throttledForceReloadCurrentArtwork()
+                    callbacks.requestRender()
                 }
                 Prefs.PREF_LOCK_DIM_AMOUNT -> {
                     renderer.recomputeMaxDimAmount()
-                    throttledForceReloadCurrentArtwork()
+                    callbacks.requestRender()
                 }
                 Prefs.PREF_LOCK_GREY_AMOUNT -> {
                     renderer.recomputeGreyAmount()
-                    throttledForceReloadCurrentArtwork()
+                    callbacks.requestRender()
                 }
             }
         } else {
             when (key) {
                 Prefs.PREF_BLUR_AMOUNT -> {
                     renderer.recomputeMaxPrescaledBlurPixels()
-                    throttledForceReloadCurrentArtwork()
+                    callbacks.requestRender()
                 }
                 Prefs.PREF_DIM_AMOUNT -> {
                     renderer.recomputeMaxDimAmount()
-                    throttledForceReloadCurrentArtwork()
+                    callbacks.requestRender()
                 }
                 Prefs.PREF_GREY_AMOUNT -> {
                     renderer.recomputeGreyAmount()
-                    throttledForceReloadCurrentArtwork()
+                    callbacks.requestRender()
                 }
             }
-        }
-    }
-
-    private val throttledForceReloadHandler by lazy {
-        Handler(Looper.getMainLooper()) {
-            reloadCurrentArtwork()
-            true
         }
     }
 
@@ -125,11 +116,6 @@ abstract class RenderController(
         Prefs.getSharedPreferences(context)
                 .unregisterOnSharedPreferenceChangeListener(sharedPreferenceChangeListener)
         destroyed = true
-    }
-
-    private fun throttledForceReloadCurrentArtwork() {
-        throttledForceReloadHandler.removeMessages(0)
-        throttledForceReloadHandler.sendEmptyMessageDelayed(0, 250)
     }
 
     protected abstract suspend fun openDownloadedCurrentArtwork(): ImageLoader
