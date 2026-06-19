@@ -46,7 +46,6 @@ import com.google.android.apps.muzei.room.MuzeiDatabase
 import com.google.android.apps.muzei.util.ContentProviderClientCompat
 import com.google.android.apps.muzei.util.getLong
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import net.nurik.roman.muzei.androidclientcommon.BuildConfig
 import java.io.IOException
@@ -65,7 +64,6 @@ class ArtworkLoadWorker(
     companion object {
         private const val TAG = "ArtworkLoad"
         private const val PERIODIC_TAG = "ArtworkLoadPeriodic"
-        private const val ARTWORK_LOAD_THROTTLE = 250L // quarter second
 
         internal fun enqueueNext(context: Context) {
             val workManager = WorkManager.getInstance(context)
@@ -100,9 +98,7 @@ class ArtworkLoadWorker(
     }
 
     override suspend fun doWork() = withContext(syncSingleThreadContext) {
-        // Throttle artwork loads
-        delay(ARTWORK_LOAD_THROTTLE)
-        // Now actually load the artwork
+        // Load the artwork
         val database = MuzeiDatabase.getInstance(applicationContext)
         val (authority) = database.providerDao()
                 .getCurrentProvider() ?: return@withContext Result.failure()
