@@ -103,8 +103,6 @@ internal class GLPicture @SuppressLint("CheckResult") internal constructor(
         }
     }
 
-    private val vertices = FloatArray(COORDS_PER_VERTEX * VERTICES)
-    private val vertexBuffer: FloatBuffer = GLUtil.newFloatBuffer(vertices.size)
     private val textureCoordsBuffer: FloatBuffer = GLUtil.asFloatBuffer(SQUARE_TEXTURE_VERTICES)
 
     private val numColumns: Int
@@ -112,6 +110,9 @@ internal class GLPicture @SuppressLint("CheckResult") internal constructor(
     private val width = bitmap.width
     private val height = bitmap.height
     private val textureHandles: IntArray
+    // One prebuilt vertex buffer per tile. The tile geometry is constant (pan/zoom is applied via
+    // the MVP matrix), so we compute it once here instead of rebuilding it every draw/frame.
+    private val vertexBuffers: Array<FloatBuffer>
 
     init {
         val leftoverHeight = height % TILE_SIZE
@@ -144,6 +145,22 @@ internal class GLPicture @SuppressLint("CheckResult") internal constructor(
                 }
             }
         }
+
+        vertexBuffers = Array(numColumns * numRows) { index ->
+            val x = index % numColumns
+            val y = index / numColumns
+            val left = min(-1f + 2f * x * TILE_SIZE / width, 1f)
+            val right = min(-1f + 2f * (x + 1) * TILE_SIZE / width, 1f)
+            val top = min(-1f + 2f * (y + 1) * TILE_SIZE / height, 1f)
+            val bottom = min(-1f + 2f * y * TILE_SIZE / height, 1f)
+            GLUtil.asFloatBuffer(floatArrayOf(
+                    left, top, 0f,      // top left
+                    left, bottom, 0f,   // bottom left
+                    right, bottom, 0f,  // bottom right
+                    left, top, 0f,      // top left
+                    right, bottom, 0f,  // bottom right
+                    right, top, 0f))    // top right
+        }
     }
 
     fun draw(mvpMatrix: FloatArray, alpha: Float) {
@@ -154,11 +171,8 @@ internal class GLPicture @SuppressLint("CheckResult") internal constructor(
         GLES20.glUniformMatrix4fv(UNIFORM_MVP_MATRIX_HANDLE, 1, false, mvpMatrix, 0)
         GLUtil.checkGlError("glUniformMatrix4fv")
 
-        // Set up vertex buffer
+        // Set up vertex attribs
         GLES20.glEnableVertexAttribArray(ATTRIB_POSITION_HANDLE)
-        GLES20.glVertexAttribPointer(ATTRIB_POSITION_HANDLE,
-                COORDS_PER_VERTEX, GLES20.GL_FLOAT, false,
-                VERTEX_STRIDE_BYTES, vertexBuffer)
 
         // Set up texture stuff
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
@@ -171,32 +185,17 @@ internal class GLPicture @SuppressLint("CheckResult") internal constructor(
         // Set the alpha
         GLES20.glUniform1f(UNIFORM_ALPHA_HANDLE, alpha)
 
-        // Draw tiles
-        for (y in 0 until numRows) {
-            for (x in 0 until numColumns) {
-                // Pass in the vertex information
-                vertices[9] = min(-1 + 2f * x.toFloat() * TILE_SIZE.toFloat() / width, 1f)
-                vertices[3] = vertices[9]
-                vertices[0] = vertices[3] // left
-                vertices[16] = min(-1 + 2f * (y + 1).toFloat() * TILE_SIZE.toFloat() / height, 1f)
-                vertices[10] = vertices[16]
-                vertices[1] = vertices[10] // top
-                vertices[15] = min(-1 + 2f * (x + 1).toFloat() * TILE_SIZE.toFloat() / width, 1f)
-                vertices[12] = vertices[15]
-                vertices[6] = vertices[12] // right
-                vertices[13] = min(-1 + 2f * y.toFloat() * TILE_SIZE.toFloat() / height, 1f)
-                vertices[7] = vertices[13]
-                vertices[4] = vertices[7] // bottom
-                vertexBuffer.put(vertices)
-                vertexBuffer.position(0)
+        // Draw tiles using the prebuilt per-tile vertex buffers
+        for (index in textureHandles.indices) {
+            GLES20.glVertexAttribPointer(ATTRIB_POSITION_HANDLE,
+                    COORDS_PER_VERTEX, GLES20.GL_FLOAT, false,
+                    VERTEX_STRIDE_BYTES, vertexBuffers[index])
 
-                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D,
-                        textureHandles[y * numColumns + x])
-                GLUtil.checkGlError("glBindTexture")
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureHandles[index])
+            GLUtil.checkGlError("glBindTexture")
 
-                // Draw the two triangles
-                GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, vertices.size / COORDS_PER_VERTEX)
-            }
+            // Draw the two triangles
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, VERTICES)
         }
 
         GLES20.glDisableVertexAttribArray(ATTRIB_POSITION_HANDLE)
