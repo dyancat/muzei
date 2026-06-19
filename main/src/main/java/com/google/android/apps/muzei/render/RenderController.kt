@@ -55,52 +55,24 @@ abstract class RenderController(
         set(value) {
             if (field != value) {
                 field = value
-                renderer.recomputeMaxPrescaledBlurPixels(
-                        if (value) Prefs.PREF_LOCK_BLUR_AMOUNT else Prefs.PREF_BLUR_AMOUNT)
-                renderer.recomputeMaxDimAmount(
-                        if (value) Prefs.PREF_LOCK_DIM_AMOUNT else Prefs.PREF_DIM_AMOUNT)
-                renderer.recomputeGreyAmount(
-                        if (value) Prefs.PREF_LOCK_GREY_AMOUNT else Prefs.PREF_GREY_AMOUNT)
-                // The GPU blur reads the blur/dim/grey amounts live and onDrawFrame eases the
-                // effective values toward the new targets, so the home<->lock transition animates
-                // without re-decoding the artwork. Just kick a render to start the easing; it keeps
-                // running in the background (see MuzeiWallpaperEngine.onVisibilityChanged).
-                callbacks.requestRender()
+                // Both blur levels are pre-blurred per artwork, so the home<->lock transition is
+                // just a time-based crossfade of those textures plus dim/grey interpolation — no
+                // re-decode and no blur work. It keeps running in the background to completion
+                // (see MuzeiWallpaperEngine.onVisibilityChanged).
+                renderer.setOnLockScreen(value)
             }
         }
     private lateinit var coroutineScope: CoroutineScope
     private var destroyed = false
     private var queuedImageLoader: ImageLoader? = null
     private val sharedPreferenceChangeListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-        if (onLockScreen) {
-            when (key) {
-                Prefs.PREF_LOCK_BLUR_AMOUNT -> {
-                    renderer.recomputeMaxPrescaledBlurPixels()
-                    callbacks.requestRender()
-                }
-                Prefs.PREF_LOCK_DIM_AMOUNT -> {
-                    renderer.recomputeMaxDimAmount()
-                    callbacks.requestRender()
-                }
-                Prefs.PREF_LOCK_GREY_AMOUNT -> {
-                    renderer.recomputeGreyAmount()
-                    callbacks.requestRender()
-                }
-            }
-        } else {
-            when (key) {
-                Prefs.PREF_BLUR_AMOUNT -> {
-                    renderer.recomputeMaxPrescaledBlurPixels()
-                    callbacks.requestRender()
-                }
-                Prefs.PREF_DIM_AMOUNT -> {
-                    renderer.recomputeMaxDimAmount()
-                    callbacks.requestRender()
-                }
-                Prefs.PREF_GREY_AMOUNT -> {
-                    renderer.recomputeGreyAmount()
-                    callbacks.requestRender()
-                }
+        // The renderer reads all six home/lock blur/dim/grey amounts, so any of them recomputes the
+        // same way. The blur levels re-blur lazily on the next frame if a radius changed.
+        when (key) {
+            Prefs.PREF_BLUR_AMOUNT, Prefs.PREF_DIM_AMOUNT, Prefs.PREF_GREY_AMOUNT,
+            Prefs.PREF_LOCK_BLUR_AMOUNT, Prefs.PREF_LOCK_DIM_AMOUNT, Prefs.PREF_LOCK_GREY_AMOUNT -> {
+                renderer.recomputeEffects()
+                callbacks.requestRender()
             }
         }
     }

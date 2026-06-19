@@ -25,7 +25,6 @@ import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.opengl.Matrix
 import android.util.Log
-import android.view.animation.AccelerateDecelerateInterpolator
 import androidx.annotation.Keep
 import androidx.core.graphics.scale
 import com.google.android.apps.muzei.ArtDetailOpen
@@ -45,7 +44,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
-import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
@@ -86,8 +84,12 @@ class MuzeiBlurRenderer(
         // runtime blur amount changes.
         private const val MAX_BLUR_AMOUNT = 500
 
-        // Per-frame easing fraction for home<->lock (and settings) effect transitions.
-        private const val PARAM_EASE_FACTOR = 0.15f
+        // Duration of an effect transition (home<->lock, or a settings change). TRANSITION_SCALE is
+        // the integer range the (int-valued) TickingFloatAnimator runs over, read back as a 0..1
+        // fraction — large enough that reversing mid-transition keeps its position rather than
+        // snapping to an endpoint.
+        private const val EFFECT_TRANSITION_DURATION = 400
+        private const val TRANSITION_SCALE = 1000
 
         // Prescaled blur radius (in source texels) over which the blurred overlay fades in. Below
         // this the full-res sharp picture still shows through, so a tiny radius doesn't abruptly
@@ -104,15 +106,28 @@ class MuzeiBlurRenderer(
     // Blur-source downscale, read from the background decode thread (see decode()), so volatile.
     // Sized for MAX_BLUR_AMOUNT so it doesn't depend on the current blur amount.
     @Volatile private var blurredSampleSize: Int = 0
-    // Effect-strength targets, set by recompute*() on the main thread and read on the GL thread.
-    @Volatile private var targetPrescaledBlurPixels: Int = 0
-    @Volatile private var targetDim: Int = 0
-    @Volatile private var targetGrey: Int = 0
-    // Effective effect strengths, eased toward the targets each frame (GL thread only) so a
-    // home<->lock or settings change animates smoothly instead of needing a re-decode + crossfade.
-    private var maxPrescaledBlurPixels = 0f
-    private var maxDim = 0f
-    private var maxGrey = 0f
+    // Home- and lock-screen effect values, read from prefs (recomputeEffects, main thread) and read
+    // on the GL thread. The two blur levels are pre-blurred per artwork (see applyDecoded).
+    @Volatile private var homeBlurRadius = 0f
+    @Volatile private var lockBlurRadius = 0f
+    @Volatile private var homeDim = 0
+    @Volatile private var lockDim = 0
+    @Volatile private var homeGrey = 0
+    @Volatile private var lockGrey = 0
+    // Which screen's values are the current target. Set on the main thread.
+    @Volatile private var onLockScreenTarget = false
+
+    // Effect transition (GL-thread state). Whenever the target changes — a lock toggle OR a settings
+    // change — the displayed blur/dim/grey animate from their current values ('from') to the new
+    // target ('to'). The blur is a crossfade between the 'from' and 'to' radii's pre-blurred
+    // textures, so a lock toggle (both endpoints precomputed) does no blur work.
+    private var fromBlurRadius = 0f
+    private var toBlurRadius = 0f
+    private var fromDim = 0f
+    private var toDim = 0f
+    private var fromGrey = 0f
+    private var toGrey = 0f
+    private var transitionFraction = 0f // 0 == from, 1 == to; from transitionAnimator each frame
 
     // Model and view matrices. Projection and MVP stored in picture set
     private val modelMatrix = FloatArray(16)
@@ -143,13 +158,11 @@ class MuzeiBlurRenderer(
 
     var isBlurred = true
         private set
-    private var blurPreferenceName = Prefs.PREF_BLUR_AMOUNT
-    private var dimPreferenceName = Prefs.PREF_DIM_AMOUNT
-    private var greyPreferenceName = Prefs.PREF_GREY_AMOUNT
     private var blurRelatedToArtDetailMode = false
-    private val blurInterpolator = AccelerateDecelerateInterpolator()
     private val blurAnimator = TickingFloatAnimator(BLUR_ANIMATION_DURATION * if (demoMode) 5 else 1)
     private val crossfadeAnimator = TickingFloatAnimator(CROSSFADE_ANIMATION_DURATION)
+    // Animates transitionFraction (0..TRANSITION_SCALE) on a target change (lock toggle or setting).
+    private val transitionAnimator = TickingFloatAnimator(EFFECT_TRANSITION_DURATION)
 
     init {
         val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
@@ -160,86 +173,94 @@ class MuzeiBlurRenderer(
         nextGLPictureSet = GLPictureSet(1) // for transitioning to next pictures
         setNormalOffsetX(0f)
         setZoom(1f)
-        recomputeMaxPrescaledBlurPixels()
-        recomputeMaxDimAmount()
-        recomputeGreyAmount()
-        // Start at the targets rather than easing up from zero on first frame.
-        snapEffectParams()
+        recomputeEffects()
+        snapEffects()
     }
 
-    fun recomputeMaxPrescaledBlurPixels(
-            newBlurPreferenceName: String = blurPreferenceName
-    ) {
-        blurPreferenceName = newBlurPreferenceName
-        // Compute blur sizes
-        val blurAmount = if (demoMode)
-            DEMO_BLUR
-        else
-            Prefs.getSharedPreferences(context)
-                    .getInt(blurPreferenceName, DEFAULT_BLUR)
+    /**
+     * Recomputes the home- and lock-screen blur/dim/grey from preferences. Both blur radii are
+     * read so the two levels can be pre-blurred per artwork; the current screen and any transition
+     * are then just a crossfade. Call on any blur/dim/grey preference change.
+     */
+    fun recomputeEffects() {
+        val prefs = Prefs.getSharedPreferences(context)
         val dm = context.resources.displayMetrics
         // Size the downscaled blur source for the strongest possible blur, so its resolution is
-        // independent of the current blur amount — only the runtime radius below changes. That lets
-        // home<->lock and settings changes animate without re-decoding the source.
+        // independent of the chosen blur amount (only the radius differs between levels).
         val maxPossibleBlurPx = (dm.heightPixels * (MAX_BLUR_AMOUNT * 0.0001f)).toInt()
-        blurredSampleSize = 4
-        while (maxPossibleBlurPx / blurredSampleSize > GLBlur.MAX_RADIUS) {
-            blurredSampleSize = blurredSampleSize shl 1
+        var sampleSize = 4
+        while (maxPossibleBlurPx / sampleSize > GLBlur.MAX_RADIUS) {
+            sampleSize = sampleSize shl 1
         }
-        val maxBlurPx = (dm.heightPixels * (blurAmount * 0.0001f)).toInt()
-        targetPrescaledBlurPixels = maxBlurPx / blurredSampleSize
-    }
+        blurredSampleSize = sampleSize
 
-    fun recomputeMaxDimAmount(
-            newDimPreferenceName: String = dimPreferenceName
-    ) {
-        dimPreferenceName = newDimPreferenceName
-        targetDim = Prefs.getSharedPreferences(context).getInt(
-                dimPreferenceName, DEFAULT_MAX_DIM)
-    }
-
-    fun recomputeGreyAmount(
-            newGreyPreferenceName: String = greyPreferenceName
-    ) {
-        greyPreferenceName = newGreyPreferenceName
-        targetGrey = if (demoMode)
-            DEMO_GREY
-        else
-            Prefs.getSharedPreferences(context)
-                    .getInt(greyPreferenceName, DEFAULT_GREY)
-    }
-
-    /** Snaps the effective effect strengths to their targets, skipping the transition animation. */
-    private fun snapEffectParams() {
-        maxPrescaledBlurPixels = targetPrescaledBlurPixels.toFloat()
-        maxDim = targetDim.toFloat()
-        maxGrey = targetGrey.toFloat()
-    }
-
-    /** Eases the effective effect strengths toward their targets. Returns true while still moving. */
-    private fun easeEffectParams(): Boolean {
-        maxPrescaledBlurPixels = ease(maxPrescaledBlurPixels, targetPrescaledBlurPixels.toFloat())
-        maxDim = ease(maxDim, targetDim.toFloat())
-        maxGrey = ease(maxGrey, targetGrey.toFloat())
-        return maxPrescaledBlurPixels != targetPrescaledBlurPixels.toFloat() ||
-                maxDim != targetDim.toFloat() ||
-                maxGrey != targetGrey.toFloat()
-    }
-
-    private fun ease(current: Float, target: Float): Float {
-        if (current == target) {
-            return target
+        if (demoMode) {
+            homeBlurRadius = prescaledBlurRadius(DEMO_BLUR, dm.heightPixels, sampleSize)
+            lockBlurRadius = homeBlurRadius
+            homeDim = DEMO_DIM
+            lockDim = DEMO_DIM
+            homeGrey = DEMO_GREY
+            lockGrey = DEMO_GREY
+            return
         }
-        val next = current + (target - current) * PARAM_EASE_FACTOR
-        return if (abs(next - target) < 1f) target else next
+        homeBlurRadius = prescaledBlurRadius(
+                prefs.getInt(Prefs.PREF_BLUR_AMOUNT, DEFAULT_BLUR), dm.heightPixels, sampleSize)
+        lockBlurRadius = prescaledBlurRadius(
+                prefs.getInt(Prefs.PREF_LOCK_BLUR_AMOUNT, DEFAULT_BLUR), dm.heightPixels, sampleSize)
+        homeDim = prefs.getInt(Prefs.PREF_DIM_AMOUNT, DEFAULT_MAX_DIM)
+        lockDim = prefs.getInt(Prefs.PREF_LOCK_DIM_AMOUNT, DEFAULT_MAX_DIM)
+        homeGrey = prefs.getInt(Prefs.PREF_GREY_AMOUNT, DEFAULT_GREY)
+        lockGrey = prefs.getInt(Prefs.PREF_LOCK_GREY_AMOUNT, DEFAULT_GREY)
     }
 
-    /** Dim alpha (0..255 scale) for an artwork of the given [darkness], at the current dim setting. */
-    private fun dimAmountFor(darkness: Float): Float =
+    private fun prescaledBlurRadius(blurAmount: Int, screenHeight: Int, sampleSize: Int): Float =
+        (screenHeight * (blurAmount * 0.0001f)) / sampleSize
+
+    /** Selects which screen's effect values are the target; the change animates (see [onDrawFrame]). */
+    fun setOnLockScreen(onLockScreen: Boolean) {
+        onLockScreenTarget = onLockScreen
+        callbacks.requestRender()
+    }
+
+    private fun targetBlurRadius() = if (onLockScreenTarget) lockBlurRadius else homeBlurRadius
+    private fun targetDim() = (if (onLockScreenTarget) lockDim else homeDim).toFloat()
+    private fun targetGrey() = (if (onLockScreenTarget) lockGrey else homeGrey).toFloat()
+
+    /** Jumps the displayed effect values to the current target with no animation (init / resize). */
+    private fun snapEffects() {
+        fromBlurRadius = targetBlurRadius(); toBlurRadius = fromBlurRadius
+        fromDim = targetDim(); toDim = fromDim
+        fromGrey = targetGrey(); toGrey = fromGrey
+    }
+
+    /**
+     * If the target effect values changed (a lock toggle or a settings change), starts a transition
+     * from the currently displayed values to the new target. Runs on the GL thread (onDrawFrame).
+     */
+    private fun maybeStartEffectTransition() {
+        val targetBlur = targetBlurRadius()
+        val targetDim = targetDim()
+        val targetGrey = targetGrey()
+        if (targetBlur == toBlurRadius && targetDim == toDim && targetGrey == toGrey) {
+            return
+        }
+        // Animate from whatever is currently displayed (so reversing mid-transition is smooth).
+        val t = transitionFraction
+        fromBlurRadius = interpolate(fromBlurRadius, toBlurRadius, t)
+        fromDim = interpolate(fromDim, toDim, t)
+        fromGrey = interpolate(fromGrey, toGrey, t)
+        toBlurRadius = targetBlur
+        toDim = targetDim
+        toGrey = targetGrey
+        transitionAnimator.start(0, TRANSITION_SCALE) { }
+    }
+
+    /** Dim alpha (0..255 scale) for an artwork of the given [darkness], at [dim] strength. */
+    private fun dimAmountFor(darkness: Float, dim: Float): Float =
         if (demoMode)
             DEMO_DIM.toFloat()
         else
-            maxDim * (1 - DIM_RANGE + DIM_RANGE * sqrt(darkness.toDouble()).toFloat())
+            dim * (1 - DIM_RANGE + DIM_RANGE * sqrt(darkness.toDouble()).toFloat())
 
     override fun onSurfaceCreated(unused: GL10, config: EGLConfig) {
         surfaceCreated = false
@@ -279,10 +300,11 @@ class MuzeiBlurRenderer(
         }
         currentGLPictureSet.recomputeTransformMatrices()
         nextGLPictureSet.recomputeTransformMatrices()
-        recomputeMaxPrescaledBlurPixels()
-        // A size change can change the target blur radius (it scales with screen height); apply it
-        // immediately rather than easing from the pre-resize value over the next few frames.
-        snapEffectParams()
+        // A size change rescales the blur radii (they scale with screen height); the artwork is
+        // reloaded for the new size, which re-blurs the levels in applyDecoded. Snap rather than
+        // animate the rescale.
+        recomputeEffects()
+        snapEffects()
     }
 
     fun hintViewportSize(width: Int, height: Int) {
@@ -297,18 +319,22 @@ class MuzeiBlurRenderer(
 
         val (stillCrossFadeAnimating, onCrossFadeEnd) = crossfadeAnimator.tick()
         val (stillBlurAnimating, onBlurEnd) = blurAnimator.tick()
-        val stillParamsAnimating = easeEffectParams()
-        val stillAnimating = stillCrossFadeAnimating or stillBlurAnimating or stillParamsAnimating
+        transitionAnimator.tick()
+        // Start a new effect transition if the target changed (lock toggle or settings change).
+        maybeStartEffectTransition()
+        transitionFraction = transitionAnimator.currentValue / TRANSITION_SCALE
+        val stillAnimating = stillCrossFadeAnimating or stillBlurAnimating or transitionAnimator.isRunning
 
         if (blurRelatedToArtDetailMode) {
             currentGLPictureSet.recomputeTransformMatrices()
             nextGLPictureSet.recomputeTransformMatrices()
         }
 
-        var dimAmount = dimAmountFor(currentGLPictureSet.darkness)
+        val currentDim = interpolate(fromDim, toDim, transitionFraction)
+        var dimAmount = dimAmountFor(currentGLPictureSet.darkness, currentDim)
         currentGLPictureSet.drawFrame(1f)
         if (crossfadeAnimator.isRunning || onCrossFadeEnd != null) {
-            dimAmount = interpolate(dimAmount, dimAmountFor(nextGLPictureSet.darkness),
+            dimAmount = interpolate(dimAmount, dimAmountFor(nextGLPictureSet.darkness, currentDim),
                     crossfadeAnimator.currentValue)
             nextGLPictureSet.drawFrame(crossfadeAnimator.currentValue)
         }
@@ -349,10 +375,6 @@ class MuzeiBlurRenderer(
         if (surfaceCreated) {
             callbacks.requestRender()
         }
-    }
-
-    private fun blurRadiusAtFrame(f: Float): Float {
-        return maxPrescaledBlurPixels * blurInterpolator.getInterpolation(f / blurKeyframes)
     }
 
     fun setAndConsumeImageLoader(imageLoader: ImageLoader, immediate: Boolean = false) {
@@ -556,7 +578,10 @@ class MuzeiBlurRenderer(
             darkness = decoded.darkness
 
             sharpPicture = decoded.sharp.toGLPicture()
-            blur = decoded.blurSource?.let { GLBlur().apply { setSource(it) } }
+            // Pre-blur both the home and lock levels now, so locking is a pure crossfade.
+            blur = decoded.blurSource?.let {
+                GLBlur().apply { setSource(it, homeBlurRadius, lockBlurRadius) }
+            }
 
             decoded.recycle()
             recomputeTransformMatrices()
@@ -647,16 +672,17 @@ class MuzeiBlurRenderer(
             Matrix.multiplyMM(mvpMatrix, 0, viewMatrix, 0, modelMatrix, 0)
             Matrix.multiplyMM(mvpMatrix, 0, projectionMatrix, 0, mvpMatrix, 0)
 
-            // blurFraction goes 0 (focused) -> 1 (fully blurred); grey ramps with it like the
-            // original. Desaturation is applied at full resolution (on the sharp picture, and on
-            // the blur overlay's composite) so grey stays sharp even when blur is light or off.
-            val blurFraction = blurAnimator.currentValue / blurKeyframes
-            val grey = maxGrey / 500f * blurFraction
-            // How much of the blurred overlay shows: the focus fraction, faded in with the blur
-            // radius so a tiny radius doesn't abruptly swap the full-res sharp for the downscaled
-            // source. 0 -> sharp only (incl. grey-without-blur); 1 -> blur fully covers the sharp.
-            val blurMix = (maxPrescaledBlurPixels / BLUR_FADE_IN_PIXELS).coerceIn(0f, 1f)
-            val blurWeight = blurFraction * blurMix
+            // focusFraction goes 0 (focused) -> 1 (fully blurred); grey ramps with it like the
+            // original, interpolated across the active effect transition. Grey is applied at full
+            // resolution (sharp picture + blur composite) so it stays sharp.
+            val focusFraction = blurAnimator.currentValue / blurKeyframes
+            val grey = interpolate(fromGrey, toGrey, transitionFraction) / 500f * focusFraction
+            // The blurred overlay fades in with the (transition-interpolated) blur radius so a tiny
+            // radius doesn't abruptly swap the full-res sharp for the downscaled source. 0 -> sharp
+            // only (incl. grey-without-blur); 1 -> blur fully covers the sharp.
+            val currentRadius = interpolate(fromBlurRadius, toBlurRadius, transitionFraction)
+            val blurMix = (currentRadius / BLUR_FADE_IN_PIXELS).coerceIn(0f, 1f)
+            val blurWeight = focusFraction * blurMix
 
             val overlay = blur
             if (blurWeight <= 0f || overlay == null) {
@@ -664,19 +690,23 @@ class MuzeiBlurRenderer(
                 return
             }
 
-            // Composite lerp(sharp, blurred, blurWeight) onto the background at globalAlpha. The two
-            // draws' alphas are recomposed so the visible result is exactly that single blend rather
-            // than the blurred layer merely painted over the sharp one — without this, an artwork
+            // Composite lerp(sharp, blurred, blurWeight) onto the background at globalAlpha. The
+            // alphas are recomposed so the visible result is exactly that single blend rather than
+            // the blurred layer merely painted over the sharp one — without this, an artwork
             // crossfade (globalAlpha < 1) would show the incoming image partly sharp. When the blur
             // fully covers (blurWeight == 1) the sharp layer contributes nothing, so its full-res,
-            // tiled draw is skipped entirely.
+            // tiled draw is skipped entirely. The blurred layer itself crossfades between the
+            // transition's 'from' and 'to' levels (both pre-blurred for a lock toggle; a settings
+            // change blurs the new radius once, on-screen).
             if (blurWeight < 1f) {
                 val sharpAlpha = globalAlpha * (1f - blurWeight) / (1f - globalAlpha * blurWeight)
                 sharp.draw(mvpMatrix, sharpAlpha, grey)
             }
-            overlay.drawBlurred(
+            overlay.crossfade(
                     mvpMatrix,
-                    blurRadiusAtFrame(blurAnimator.currentValue),
+                    fromBlurRadius,
+                    toBlurRadius,
+                    transitionFraction,
                     globalAlpha * blurWeight,
                     grey)
         }
