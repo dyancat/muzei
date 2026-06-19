@@ -185,6 +185,15 @@
                 <action android:name="com.twofortyfouram.locale.intent.action.FIRE_SETTING"/>
             </intent-filter>
         </receiver>
+        <!-- Receiver allowing automation apps (e.g. Tasker "Send Intent") to set effect amounts -->
+        <receiver
+            android:name="com.google.android.apps.muzei.tasker.SetEffectsReceiver"
+            android:exported="true"
+            tools:ignore="ExportedReceiver">
+            <intent-filter>
+                <action android:name="net.nurik.roman.muzei.action.SET_EFFECTS"/>
+            </intent-filter>
+        </receiver>
         <receiver
             android:name="com.joaomgcd.taskerpluginlibrary.action.BroadcastReceiverAction"
             tools:node="remove"/>
