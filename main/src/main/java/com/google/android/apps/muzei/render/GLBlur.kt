@@ -54,16 +54,26 @@ internal class GLBlur {
                 "uniform float uRadius;" +  // blur radius in texels
                 "varying vec2 vTexCoords;" +
                 "void main(){" +
-                "  float sigma = max(uRadius, 0.0001) * 0.5;" +
-                "  vec4 sum = texture2D(uTexture, vTexCoords);" +
+                "  float s = max(uRadius, 0.0001) * 0.5;" +
+                "  float twoSigmaSq = 2.0 * s * s;" +
+                "  vec4 sum = texture2D(uTexture, vTexCoords);" +  // center tap, weight 1
                 "  float wsum = 1.0;" +
-                "  for (int i = 1; i <= " + MAX_RADIUS + "; i++) {" +
-                "    if (float(i) > uRadius) break;" +
-                "    float w = exp(-float(i) * float(i) / (2.0 * sigma * sigma));" +
-                "    vec2 off = uStep * float(i);" +
-                "    sum += texture2D(uTexture, vTexCoords + off) * w;" +
-                "    sum += texture2D(uTexture, vTexCoords - off) * w;" +
-                "    wsum += 2.0 * w;" +
+                // Linear-sampling Gaussian: each iteration covers a pair of taps (i1, i2) with a
+                // single bilinear fetch per side, placed at the weight-centroid between the two
+                // texels so the hardware interpolation returns exactly w1*texel(i1)+w2*texel(i2).
+                // This halves the texture fetches for an identical result. i1 <= uRadius keeps
+                // w1 >= exp(-2) > 0, so the centroid divide is always safe.
+                "  for (int k = 1; k <= " + (MAX_RADIUS / 2) + "; k++) {" +
+                "    float i1 = float(2 * k - 1);" +
+                "    if (i1 > uRadius) break;" +
+                "    float i2 = float(2 * k);" +
+                "    float w1 = exp(-i1 * i1 / twoSigmaSq);" +
+                "    float w2 = (i2 > uRadius) ? 0.0 : exp(-i2 * i2 / twoSigmaSq);" +
+                "    float cw = w1 + w2;" +
+                "    vec2 off = uStep * ((i1 * w1 + i2 * w2) / cw);" +
+                "    sum += texture2D(uTexture, vTexCoords + off) * cw;" +
+                "    sum += texture2D(uTexture, vTexCoords - off) * cw;" +
+                "    wsum += 2.0 * cw;" +
                 "  }" +
                 "  gl_FragColor = sum / wsum;" +
                 "}"
