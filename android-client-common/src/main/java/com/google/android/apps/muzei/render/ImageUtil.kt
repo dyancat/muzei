@@ -43,16 +43,17 @@ fun Bitmap?.darkness(): Float {
         return 0f
     }
 
-    var totalLum = 0
-    var n = 0
-    var x: Int
+    // Read a row at a time with the bulk getPixels() rather than a per-pixel getPixel() (a JNI
+    // call each), so this stays cheap even on larger bitmaps.
+    val row = IntArray(width)
+    var totalLum = 0L
     var y = 0
     var color: Int
     while (y < height) {
-        x = 0
+        getPixels(row, 0, width, 0, y, width, 1)
+        var x = 0
         while (x < width) {
-            ++n
-            color = getPixel(x, y)
+            color = row[x]
             totalLum += (0.21f * Color.red(color)
                     + 0.71f * Color.green(color)
                     + 0.07f * Color.blue(color)).toInt()
@@ -61,7 +62,7 @@ fun Bitmap?.darkness(): Float {
         y++
     }
 
-    return totalLum / n / 256f
+    return totalLum.toFloat() / (width * height) / 256f
 }
 
 fun Int.sampleSize(targetSize: Int): Int {
