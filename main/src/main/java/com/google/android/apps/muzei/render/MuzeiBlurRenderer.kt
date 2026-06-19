@@ -508,6 +508,11 @@ class MuzeiBlurRenderer(
         }
 
         fun recomputeTransformMatrices() {
+            // Nothing to transform until this set has an image. Avoids recomputing the "next"
+            // (empty) picture set on every offset change while scrolling outside a crossfade.
+            if (!hasBitmap) {
+                return
+            }
             val screenToBitmapAspectRatio = aspectRatio / bitmapAspectRatio
             if (screenToBitmapAspectRatio == 0f) {
                 return
