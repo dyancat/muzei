@@ -52,10 +52,17 @@ internal class GLPicture @SuppressLint("CheckResult") internal constructor(
                 "precision mediump float;" +
                 "uniform sampler2D uTexture;" +
                 "uniform float uAlpha;" +
+                "uniform float uGrey;" +
                 "varying vec2 vTexCoords;" +
                 "void main(){" +
-                "  gl_FragColor = texture2D(uTexture, vTexCoords);" +
-                "  gl_FragColor.a = uAlpha;" +
+                "  vec4 c = texture2D(uTexture, vTexCoords);" +
+                // Desaturate here, at full resolution, so grey doesn't depend on the downscaled
+                // blur source (which would otherwise show as obvious quality loss when grey is on
+                // but blur is light or off).
+                "  float lum = dot(c.rgb, vec3(0.299, 0.587, 0.114));" +
+                "  c.rgb = mix(c.rgb, vec3(lum), clamp(uGrey, 0.0, 1.0));" +
+                "  c.a = uAlpha;" +
+                "  gl_FragColor = c;" +
                 "}"
 
         // number of coordinates per vertex in this array
@@ -79,6 +86,7 @@ internal class GLPicture @SuppressLint("CheckResult") internal constructor(
         private var ATTRIB_POSITION_HANDLE: Int = 0
         private var ATTRIB_TEXTURE_COORDS_HANDLE: Int = 0
         private var UNIFORM_ALPHA_HANDLE: Int = 0
+        private var UNIFORM_GREY_HANDLE: Int = 0
         private var UNIFORM_TEXTURE_HANDLE: Int = 0
         private var UNIFORM_MVP_MATRIX_HANDLE: Int = 0
 
@@ -95,6 +103,7 @@ internal class GLPicture @SuppressLint("CheckResult") internal constructor(
             UNIFORM_MVP_MATRIX_HANDLE = GLES20.glGetUniformLocation(PROGRAM_HANDLE, "uMVPMatrix")
             UNIFORM_TEXTURE_HANDLE = GLES20.glGetUniformLocation(PROGRAM_HANDLE, "uTexture")
             UNIFORM_ALPHA_HANDLE = GLES20.glGetUniformLocation(PROGRAM_HANDLE, "uAlpha")
+            UNIFORM_GREY_HANDLE = GLES20.glGetUniformLocation(PROGRAM_HANDLE, "uGrey")
 
             // Compute max texture size
             val maxTextureSize = IntArray(1)
@@ -163,7 +172,7 @@ internal class GLPicture @SuppressLint("CheckResult") internal constructor(
         }
     }
 
-    fun draw(mvpMatrix: FloatArray, alpha: Float) {
+    fun draw(mvpMatrix: FloatArray, alpha: Float, grey: Float = 0f) {
         // Add program to OpenGL ES environment
         GLES20.glUseProgram(PROGRAM_HANDLE)
 
@@ -182,8 +191,9 @@ internal class GLPicture @SuppressLint("CheckResult") internal constructor(
                 TEXTURE_VERTEX_STRIDE_BYTES, textureCoordsBuffer)
         GLES20.glEnableVertexAttribArray(ATTRIB_TEXTURE_COORDS_HANDLE)
 
-        // Set the alpha
+        // Set the alpha and desaturation
         GLES20.glUniform1f(UNIFORM_ALPHA_HANDLE, alpha)
+        GLES20.glUniform1f(UNIFORM_GREY_HANDLE, grey)
 
         // Draw tiles using the prebuilt per-tile vertex buffers
         for (index in textureHandles.indices) {
