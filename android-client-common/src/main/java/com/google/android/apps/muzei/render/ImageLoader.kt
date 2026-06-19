@@ -53,6 +53,7 @@ sealed class ImageLoader {
 
     companion object {
         private const val TAG = "ImageLoader"
+        private const val UNKNOWN_ROTATION = -1
 
         suspend fun decode(
                 contentResolver: ContentResolver,
@@ -65,15 +66,29 @@ sealed class ImageLoader {
         }
     }
 
+    // Rotation and original (pre-rotation) bounds are immutable for a given source, so compute
+    // each once and reuse it across the several getSize()/decode() calls made per artwork load
+    // rather than re-opening the stream (an IPC + file read for content URIs) every time.
+    private var cachedRotation: Int = UNKNOWN_ROTATION
+    private var cachedOriginalBounds: Pair<Int, Int>? = null
+
+    /** Original (pre-rotation) pixel dimensions, decoded once and cached. (0, 0) on failure. */
+    private fun originalBounds(): Pair<Int, Int> {
+        cachedOriginalBounds?.let { return it }
+        val bounds = openInputStream()?.use { input ->
+            val options = BitmapFactory.Options().apply {
+                inJustDecodeBounds = true
+            }
+            BitmapFactory.decodeStream(input, null, options)
+            options.outWidth to options.outHeight
+        } ?: (0 to 0)
+        return bounds.also { cachedOriginalBounds = it }
+    }
+
     fun getSize(): Pair<Int, Int> {
         return try {
-            val (originalWidth, originalHeight) = openInputStream()?.use { input ->
-                val options = BitmapFactory.Options().apply {
-                    inJustDecodeBounds = true
-                }
-                BitmapFactory.decodeStream(input, null, options)
-                options.outWidth to options.outHeight
-            } ?: return 0 to 0
+            val (originalWidth, originalHeight) = originalBounds()
+            if (originalWidth == 0 || originalHeight == 0) return 0 to 0
             val rotation = getRotation()
             val width = if (rotation == 90 || rotation == 270) originalHeight else originalWidth
             val height = if (rotation == 90 || rotation == 270) originalWidth else originalHeight
@@ -91,13 +106,8 @@ sealed class ImageLoader {
             targetHeight: Int = targetWidth
     ) : Bitmap? {
         return try {
-            val (originalWidth, originalHeight) = openInputStream()?.use { input ->
-                val options = BitmapFactory.Options().apply {
-                    inJustDecodeBounds = true
-                }
-                BitmapFactory.decodeStream(input, null, options)
-                Pair(options.outWidth, options.outHeight)
-            } ?: return null
+            val (originalWidth, originalHeight) = originalBounds()
+            if (originalWidth == 0 || originalHeight == 0) return null
             val rotation = getRotation()
             val width = if (rotation == 90 || rotation == 270) originalHeight else originalWidth
             val height = if (rotation == 90 || rotation == 270) originalWidth else originalHeight
@@ -137,7 +147,12 @@ sealed class ImageLoader {
         }
     }
 
-    fun getRotation(): Int = try {
+    fun getRotation(): Int {
+        cachedRotation.let { if (it != UNKNOWN_ROTATION) return it }
+        return computeRotation().also { cachedRotation = it }
+    }
+
+    private fun computeRotation(): Int = try {
         openInputStream()?.use { input ->
             val exifInterface = ExifInterface(input)
             when (exifInterface.getAttributeInt(ExifInterface.TAG_ORIENTATION,

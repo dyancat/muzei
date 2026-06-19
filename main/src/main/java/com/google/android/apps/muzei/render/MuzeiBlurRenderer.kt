@@ -377,14 +377,11 @@ class MuzeiBlurRenderer(
         }
         val bitmapAspectRatio = width * 1f / height
 
-        // Calculate image darkness to determine dim amount
-        val darknessBitmap = imageLoader.decode(64)
-        val darkness = darknessBitmap.darkness()
-        darknessBitmap?.recycle()
-        val dimAmount = if (demoMode)
-            DEMO_DIM
-        else
-            (maxDim * (1 - DIM_RANGE + DIM_RANGE * sqrt(darkness.toDouble()))).toInt()
+        // Image darkness drives the dim amount. It's computed below from the small scaled bitmap
+        // we decode for blurring (reused to avoid a dedicated decode pass); if there's no blur/grey
+        // we fall back to a tiny dedicated decode after the sharp picture.
+        var darkness = 0f
+        var darknessComputed = false
 
         // Decode the sharp picture, backing off the resolution if we run out of memory
         val targetHeight = currentHeight
@@ -430,6 +427,11 @@ class MuzeiBlurRenderer(
                     tempBitmap.recycle()
                 }
 
+                // Reuse this small, fully-decoded bitmap for the darkness calculation rather than
+                // decoding the source again at 64px purely to measure brightness.
+                darkness = scaledBitmap.darkness()
+                darknessComputed = true
+
                 // Create a blurred copy for each keyframe.
                 val blurrer = ImageBlurrer(context, scaledBitmap)
                 val frames = arrayOfNulls<Bitmap>(blurKeyframes)
@@ -450,6 +452,18 @@ class MuzeiBlurRenderer(
                 arrayOfNulls(blurKeyframes)
             }
         }
+
+        // No blurred bitmap was produced (no blur/grey, or the blur decode failed), so measure
+        // darkness from a small dedicated decode.
+        if (!darknessComputed) {
+            val darknessBitmap = imageLoader.decode(64)
+            darkness = darknessBitmap.darkness()
+            darknessBitmap?.recycle()
+        }
+        val dimAmount = if (demoMode)
+            DEMO_DIM
+        else
+            (maxDim * (1 - DIM_RANGE + DIM_RANGE * sqrt(darkness.toDouble()))).toInt()
 
         return DecodedArtwork(sharp, blurredFrames, dimAmount, bitmapAspectRatio, width, height)
     }
