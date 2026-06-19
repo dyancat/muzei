@@ -82,6 +82,10 @@ class MuzeiBlurRenderer(
         private const val DEMO_DIM = 64
         private const val DEMO_GREY = 0
         private const val DIM_RANGE = 0.5f // percent of max dim
+
+        // Decoded variants retained for the current artwork. Two covers the home- and lock-screen
+        // variants, which is the case this cache exists for.
+        private const val MAX_CACHED_VARIANTS = 2
     }
 
     private val blurKeyframes: Int
@@ -110,6 +114,16 @@ class MuzeiBlurRenderer(
     private var loadInProgress = false
     private var loadGeneration = 0
 
+    // Decoded-artwork cache for the current artwork, keyed by the blur/dim/grey config that
+    // produced each variant. Home- and lock-screen variants differ only in that config, so toggling
+    // between them reuses the already decoded + blurred bitmaps instead of re-running the whole
+    // decode. Entries are owned by the cache: applyDecoded() does not recycle them, and they're
+    // freed on the GL thread when the artwork changes, an entry is evicted, or the renderer is
+    // destroyed. Disabled on low-RAM devices, where retaining the extra bitmaps isn't worth it.
+    private var variantCacheEnabled = false
+    private var cachedArtworkKey: String? = null
+    private val variantCache = LinkedHashMap<Long, DecodedArtwork>()
+
     private var surfaceCreated: Boolean = false
 
     @Volatile
@@ -131,6 +145,7 @@ class MuzeiBlurRenderer(
     init {
         val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
         blurKeyframes = if (activityManager.isLowRamDevice) 1 else 2
+        variantCacheEnabled = !activityManager.isLowRamDevice
         blurAnimator.currentValue = blurKeyframes.toFloat()
 
         currentGLPictureSet = GLPictureSet(0)
@@ -311,8 +326,11 @@ class MuzeiBlurRenderer(
             val decoded = decode(imageLoader)
             callbacks.queueEventOnGlThread {
                 if (generation != loadGeneration) {
-                    // Superseded by a newer load; throw this one away.
-                    decoded?.recycle()
+                    // Superseded by a newer load; throw this one away (unless the variant cache
+                    // owns its bitmaps, in which case the cache will recycle them).
+                    if (decoded?.fromCache == false) {
+                        decoded.recycle()
+                    }
                     return@queueEventOnGlThread
                 }
                 loadInProgress = false
@@ -326,8 +344,11 @@ class MuzeiBlurRenderer(
             return
         }
         if (!surfaceCreated) {
-            // Surface went away while we were decoding.
-            decoded.recycle()
+            // Surface went away while we were decoding. Cache-owned bitmaps are left for the cache
+            // to recycle.
+            if (!decoded.fromCache) {
+                decoded.recycle()
+            }
             return
         }
 
@@ -371,6 +392,18 @@ class MuzeiBlurRenderer(
      * the texture upload on the GL thread. Returns null if the image can't be decoded.
      */
     private fun decode(imageLoader: ImageLoader): DecodedArtwork? {
+        if (variantCacheEnabled) {
+            val artworkKey = imageLoader.toString()
+            synchronized(variantCache) {
+                if (artworkKey != cachedArtworkKey) {
+                    // New artwork — the old variants are stale, so drop them.
+                    clearVariantCacheLocked()
+                    cachedArtworkKey = artworkKey
+                }
+                variantCache[variantConfigKey()]?.let { return it }
+            }
+        }
+
         val (width, height) = imageLoader.getSize()
         if (width == 0 || height == 0) {
             return null
@@ -466,6 +499,49 @@ class MuzeiBlurRenderer(
             (maxDim * (1 - DIM_RANGE + DIM_RANGE * sqrt(darkness.toDouble()))).toInt()
 
         return DecodedArtwork(sharp, blurredFrames, dimAmount, bitmapAspectRatio, width, height)
+                .also { cacheVariant(it) }
+    }
+
+    /** Packs the decode inputs that distinguish one variant's bitmaps from another's. */
+    private fun variantConfigKey(): Long {
+        var key = maxPrescaledBlurPixels.toLong()
+        key = key * 31 + maxGrey
+        key = key * 31 + maxDim
+        key = key * 31 + currentHeight
+        key = key * 31 + blurredSampleSize
+        return key
+    }
+
+    private fun cacheVariant(decoded: DecodedArtwork) {
+        if (!variantCacheEnabled) {
+            return
+        }
+        // The cache owns these bitmaps now, so applyDecoded() must not recycle them on upload.
+        decoded.fromCache = true
+        synchronized(variantCache) {
+            variantCache.put(variantConfigKey(), decoded)?.let { recycleOnGlThread(it) }
+            // LinkedHashMap preserves insertion order, so the first entry is the oldest variant.
+            while (variantCache.size > MAX_CACHED_VARIANTS) {
+                val oldest = variantCache.entries.iterator()
+                val evicted = oldest.next().value
+                oldest.remove()
+                recycleOnGlThread(evicted)
+            }
+        }
+    }
+
+    /** Must be called while holding the [variantCache] monitor. */
+    private fun clearVariantCacheLocked() {
+        for (artwork in variantCache.values) {
+            recycleOnGlThread(artwork)
+        }
+        variantCache.clear()
+    }
+
+    private fun recycleOnGlThread(artwork: DecodedArtwork) {
+        // Defer to the GL thread so this runs after any applyDecoded() already queued for this
+        // artwork has finished uploading its bitmaps.
+        callbacks.queueEventOnGlThread { artwork.recycle() }
     }
 
     /** Bitmaps decoded off the GL thread, awaiting texture upload (see [decode]/[present]). */
@@ -479,6 +555,10 @@ class MuzeiBlurRenderer(
             val width: Int,
             val height: Int
     ) {
+        // When true these bitmaps are owned by the variant cache; applyDecoded() leaves them for
+        // the cache to recycle rather than freeing them after upload.
+        var fromCache = false
+
         fun recycle() {
             sharp.recycle()
             blurredFrames?.forEach { it?.recycle() }
@@ -516,7 +596,11 @@ class MuzeiBlurRenderer(
                 }
             }
 
-            decoded.recycle()
+            if (!decoded.fromCache) {
+                // Cache-owned bitmaps are reused across home/lock toggles, so only recycle the
+                // ones the cache isn't holding on to.
+                decoded.recycle()
+            }
             recomputeTransformMatrices()
             callbacks.requestRender()
         }
@@ -662,6 +746,14 @@ class MuzeiBlurRenderer(
 
     fun destroy() {
         decodeScope.cancel()
+        // Runs on the GL thread, so recycle the cached bitmaps directly.
+        synchronized(variantCache) {
+            for (artwork in variantCache.values) {
+                artwork.recycle()
+            }
+            variantCache.clear()
+            cachedArtworkKey = null
+        }
         currentGLPictureSet.destroyPictures()
         nextGLPictureSet.destroyPictures()
     }
