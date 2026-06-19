@@ -125,14 +125,33 @@ sealed class ImageLoader {
                 when (rotation) {
                     0 -> this
                     else -> {
-                        val rotateMatrix = Matrix().apply {
+                        // Post-rotation displayed dimensions of the decoded bitmap.
+                        val rotated90 = rotation == 90 || rotation == 270
+                        val displayWidth = if (rotated90) this.height else this.width
+                        val displayHeight = if (rotated90) this.width else this.height
+                        // inSampleSize is power-of-two coarse, so the decode lands at or above the
+                        // target. Fold a downscale-to-target into the rotation matrix so we produce
+                        // a target-sized rotated bitmap in a single pass instead of allocating and
+                        // rotating the full-resolution one. It's a downscale (never an upscale), so
+                        // there's no quality loss, and the rotation cost drops from being
+                        // proportional to the full image to being proportional to the (small) output.
+                        val scale = if (targetWidth != 0 && targetHeight != 0) {
+                            max(targetWidth.toFloat() / displayWidth,
+                                    targetHeight.toFloat() / displayHeight).coerceAtMost(1f)
+                        } else {
+                            1f
+                        }
+                        val matrix = Matrix().apply {
+                            if (scale < 1f) {
+                                postScale(scale, scale)
+                            }
                             postRotate(rotation.toFloat())
                         }
                         Bitmap.createBitmap(
                                 this, 0, 0,
                                 this.width, this.height,
-                                rotateMatrix, true).also { rotatedBitmap ->
-                            if (rotatedBitmap != this) {
+                                matrix, true).also { transformed ->
+                            if (transformed != this) {
                                 recycle()
                             }
                         }
