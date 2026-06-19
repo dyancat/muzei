@@ -356,7 +356,6 @@ class MuzeiBlurRenderer(
             if (!demoMode) {
                 SwitchingPhotosStateFlow.value = SwitchingPhotosDone(currentGLPictureSet.id)
             }
-            System.gc()
             val loader = queuedNextImageLoader
             if (loader != null) {
                 queuedNextImageLoader = null
@@ -657,11 +656,7 @@ class MuzeiBlurRenderer(
 
         blurRelatedToArtDetailMode = artDetailMode
         this.isBlurred = isBlurred
-        blurAnimator.start(endValue = if (isBlurred) blurKeyframes else 0) {
-            if (isBlurred && artDetailMode) {
-                System.gc()
-            }
-        }
+        blurAnimator.start(endValue = if (isBlurred) blurKeyframes else 0) {}
         callbacks.requestRender()
     }
 
