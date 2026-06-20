@@ -22,6 +22,7 @@ import android.content.ComponentName
 import android.content.Intent
 import android.os.Bundle
 import android.view.LayoutInflater
+import android.view.View
 import android.view.ViewGroup
 import android.widget.Toast
 import androidx.fragment.app.Fragment
@@ -30,6 +31,7 @@ import com.google.android.apps.muzei.util.toast
 import com.google.firebase.Firebase
 import com.google.firebase.analytics.FirebaseAnalytics
 import com.google.firebase.analytics.analytics
+import net.nurik.roman.muzei.BuildConfig
 import net.nurik.roman.muzei.R
 
 class IntroFragment : Fragment() {
@@ -46,24 +48,31 @@ class IntroFragment : Fragment() {
         inflater: LayoutInflater,
         container: ViewGroup?,
         savedInstanceState: Bundle?
-    ) = content {
-        Intro(
-            onActivate = {
-                try {
-                    startActivity(Intent(WallpaperManager.ACTION_CHANGE_LIVE_WALLPAPER)
-                        .putExtra(WallpaperManager.EXTRA_LIVE_WALLPAPER_COMPONENT,
-                            ComponentName(requireContext(),
-                                MuzeiWallpaperService::class.java))
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                } catch (_: ActivityNotFoundException) {
-                    try {
-                        startActivity(Intent(WallpaperManager.ACTION_LIVE_WALLPAPER_CHOOSER)
-                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                    } catch (_: ActivityNotFoundException) {
-                        requireContext().toast(R.string.error_wallpaper_chooser, Toast.LENGTH_LONG)
-                    }
-                }
+    ): View {
+        // On debug builds, skip the manual tap and jump straight to the wallpaper picker.
+        // savedInstanceState == null avoids re-firing when the fragment is recreated.
+        if (BuildConfig.DEBUG && savedInstanceState == null) {
+            activate()
+        }
+        return content {
+            Intro(onActivate = ::activate)
+        }
+    }
+
+    private fun activate() {
+        try {
+            startActivity(Intent(WallpaperManager.ACTION_CHANGE_LIVE_WALLPAPER)
+                .putExtra(WallpaperManager.EXTRA_LIVE_WALLPAPER_COMPONENT,
+                    ComponentName(requireContext(),
+                        MuzeiWallpaperService::class.java))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        } catch (_: ActivityNotFoundException) {
+            try {
+                startActivity(Intent(WallpaperManager.ACTION_LIVE_WALLPAPER_CHOOSER)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            } catch (_: ActivityNotFoundException) {
+                requireContext().toast(R.string.error_wallpaper_chooser, Toast.LENGTH_LONG)
             }
-        )
+        }
     }
 }
