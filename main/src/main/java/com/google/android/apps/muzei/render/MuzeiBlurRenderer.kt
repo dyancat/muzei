@@ -271,6 +271,7 @@ class MuzeiBlurRenderer(
 
     override fun onSurfaceChanged(unused: GL10, width: Int, height: Int) {
         GLES20.glViewport(0, 0, width, height)
+        GLBlur.setScreenSize(width, height)
         hintViewportSize(width, height)
         if (!demoMode && !preview) {
             // Reset art detail viewports

@@ -163,6 +163,18 @@ internal class GLBlur {
             blurTexCoords = GLUtil.asFloatBuffer(BLUR_TEXCOORDS)
             compositeTexCoords = GLUtil.asFloatBuffer(COMPOSITE_TEXCOORDS)
         }
+
+        // Surface dimensions, so runBlurPasses can restore the viewport after its off-screen passes
+        // without a glGetIntegerv round-trip. The blur is only ever invoked while the renderer is
+        // drawing to the full-surface default framebuffer, so this is always the viewport to restore.
+        private var screenWidth = 0
+        private var screenHeight = 0
+
+        /** Records the surface size (call from the renderer's onSurfaceChanged). */
+        fun setScreenSize(width: Int, height: Int) {
+            screenWidth = width
+            screenHeight = height
+        }
     }
 
     private var sourceTexture = 0
@@ -170,8 +182,6 @@ internal class GLBlur {
     private var height = 0
     private val fbos = IntArray(2)
     private val fboTextures = IntArray(2)
-    private val savedViewport = IntArray(4)
-    private val savedFramebuffer = IntArray(1)
     private var ready = false
     // Radius the cached fbo[1] was last blurred at; -1 forces a (re)blur on the next draw.
     private var lastBlurRadius = -1f
@@ -251,10 +261,6 @@ internal class GLBlur {
 
     /** Runs the two separable blur passes (source -> fbo[0] -> fbo[1]) into the cached FBOs. */
     private fun runBlurPasses(radiusPx: Float) {
-        // Remember the framebuffer/viewport so we can restore them after the off-screen passes.
-        GLES20.glGetIntegerv(GLES20.GL_FRAMEBUFFER_BINDING, savedFramebuffer, 0)
-        GLES20.glGetIntegerv(GLES20.GL_VIEWPORT, savedViewport, 0)
-
         // The blur passes fully overwrite their FBO, so blending is off for them.
         GLES20.glDisable(GLES20.GL_BLEND)
         GLES20.glUseProgram(blurProgram)
@@ -282,12 +288,14 @@ internal class GLBlur {
         GLES20.glDisableVertexAttribArray(blurPositionHandle)
         GLES20.glDisableVertexAttribArray(blurTexCoordsHandle)
 
-        // Restore the framebuffer/viewport and re-enable blending. drawBlurred() requires blending
-        // for the composite pass that follows, and the renderer keeps GL_BLEND enabled for the rest
-        // of the frame, so this is the correct state to leave it in (callers must invoke the blur
-        // with blending enabled).
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, savedFramebuffer[0])
-        GLES20.glViewport(savedViewport[0], savedViewport[1], savedViewport[2], savedViewport[3])
+        // Restore the default framebuffer and full-surface viewport, and re-enable blending. The
+        // blur is only ever invoked while the renderer draws to the default framebuffer at the full
+        // surface size (see setScreenSize), so these are the values to restore — no glGetIntegerv
+        // round-trip needed. drawBlurred() requires blending for the composite pass that follows,
+        // and the renderer keeps GL_BLEND enabled for the rest of the frame, so this is the correct
+        // state to leave it in (callers must invoke the blur with blending enabled).
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        GLES20.glViewport(0, 0, screenWidth, screenHeight)
         GLES20.glEnable(GLES20.GL_BLEND)
     }
 
