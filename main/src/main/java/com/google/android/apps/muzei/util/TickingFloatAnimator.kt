@@ -24,6 +24,12 @@ import kotlin.math.min
 // Non thread-safe
 class TickingFloatAnimator(private val duration: Int) {
 
+    private companion object {
+        // Shared result for the common "not running" tick, so an idle animator allocates nothing
+        // (tick() is called every rendered frame, including during scrolling).
+        val NOT_RUNNING: Pair<Boolean, (() -> Unit)?> = Pair(false, null)
+    }
+
     private var startValue: Int = 0
     private var endValue: Int = 0
     private var onEnd: () -> Unit = { }
@@ -51,9 +57,17 @@ class TickingFloatAnimator(private val duration: Int) {
         }
     }
 
-    fun tick(): Boolean {
+    /**
+     * Advances the animation to the current time.
+     *
+     * @return a pair of the running state and, only on the tick where the animation
+     * just finished, its [onEnd] callback (null otherwise). The caller must invoke the
+     * returned callback *after* drawing the final frame, since [onEnd] may mutate state
+     * that would otherwise be rendered a frame too early.
+     */
+    fun tick(): Pair<Boolean, (() -> Unit)?> {
         if (!isRunning) {
-            return false
+            return NOT_RUNNING
         }
 
         val t = min((SystemClock.elapsedRealtime() - startTime).toFloat() / duration, 1f)
@@ -62,8 +76,9 @@ class TickingFloatAnimator(private val duration: Int) {
         currentValue = if (isRunning) {
             startValue + interpolator.getInterpolation(t) * (endValue - startValue)
         } else {
-            endValue.toFloat().also { onEnd() }
+            endValue.toFloat()
         }
-        return isRunning
+
+        return Pair(isRunning, if (!isRunning) onEnd else null)
     }
 }
