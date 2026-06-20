@@ -22,6 +22,7 @@ import com.google.android.apps.muzei.api.MuzeiContract
 import com.google.android.apps.muzei.room.MuzeiDatabase
 import com.google.android.apps.muzei.room.contentUri
 import com.google.android.apps.muzei.util.collectIn
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
 
 class RealRenderController(
@@ -44,7 +45,13 @@ class RealRenderController(
     override fun onStart(owner: LifecycleOwner) {
         super.onStart(owner)
         val database = MuzeiDatabase.getInstance(context)
-        database.artworkDao().getCurrentArtworkFlow().filterNotNull().collectIn(owner) { artwork ->
+        database.artworkDao().getCurrentArtworkFlow().filterNotNull()
+                // Provider row updates (e.g. supportsNextArtwork being refreshed by
+                // ProviderChangedWorker right after a provider switch) re-emit the same
+                // artwork. Without this, switching providers decodes the image twice and
+                // restarts the crossfade mid-animation, which reads as lag.
+                .distinctUntilChanged()
+                .collectIn(owner) { artwork ->
             currentArtworkUri = artwork.contentUri
             reloadCurrentArtwork()
         }
