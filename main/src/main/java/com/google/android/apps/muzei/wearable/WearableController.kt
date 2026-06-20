@@ -34,6 +34,7 @@ import com.google.android.gms.wearable.PutDataMapRequest
 import com.google.android.gms.wearable.Wearable
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
@@ -51,7 +52,8 @@ class WearableController(private val context: Context) : DefaultLifecycleObserve
     override fun onCreate(owner: LifecycleOwner) {
         // Update Android Wear whenever the artwork changes
         val database = MuzeiDatabase.getInstance(context)
-        database.artworkDao().getCurrentArtworkFlow().filterNotNull().collectIn(owner) { artwork ->
+        database.artworkDao().getCurrentArtworkFlow().filterNotNull().distinctUntilChanged()
+                .collectIn(owner) { artwork ->
             updateArtwork(artwork)
         }
     }

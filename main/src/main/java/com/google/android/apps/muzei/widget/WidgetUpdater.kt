@@ -23,6 +23,7 @@ import com.google.android.apps.muzei.room.MuzeiDatabase
 import com.google.android.apps.muzei.util.collectIn
 import com.google.android.apps.muzei.wallpaper.WallpaperActiveState
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.withContext
 
 /**
@@ -33,7 +34,7 @@ class WidgetUpdater(private val context: Context) : DefaultLifecycleObserver {
     override fun onCreate(owner: LifecycleOwner) {
         // Set up a ContentObserver to update widgets whenever the artwork changes
         val database = MuzeiDatabase.getInstance(context)
-        database.artworkDao().getCurrentArtworkFlow().collectIn(owner) {
+        database.artworkDao().getCurrentArtworkFlow().distinctUntilChanged().collectIn(owner) {
             updateAppWidget()
         }
         database.providerDao().getCurrentProviderFlow().collectIn(owner) {

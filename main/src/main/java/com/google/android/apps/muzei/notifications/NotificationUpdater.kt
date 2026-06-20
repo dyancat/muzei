@@ -21,6 +21,7 @@ import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import com.google.android.apps.muzei.room.MuzeiDatabase
 import com.google.android.apps.muzei.util.collectIn
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
 
 /**
@@ -31,7 +32,7 @@ class NotificationUpdater(private val context: Context) : DefaultLifecycleObserv
     override fun onCreate(owner: LifecycleOwner) {
         // Update notifications whenever the artwork changes
         val database = MuzeiDatabase.getInstance(context)
-        database.artworkDao().getCurrentArtworkFlow().filterNotNull().collectIn(owner) {
+        database.artworkDao().getCurrentArtworkFlow().filterNotNull().distinctUntilChanged().collectIn(owner) {
             NewWallpaperNotificationReceiver
                     .maybeShowNewArtworkNotification(context)
         }

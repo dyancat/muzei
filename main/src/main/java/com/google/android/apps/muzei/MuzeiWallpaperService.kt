@@ -70,6 +70,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -232,7 +233,7 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
                     repeatOnLifecycle(Lifecycle.State.STARTED) {
                         val database = MuzeiDatabase.getInstance(this@MuzeiWallpaperService)
                         database.artworkDao().getCurrentArtworkFlow()
-                            .filterNotNull().collectLatest { artwork ->
+                            .filterNotNull().distinctUntilChanged().collectLatest { artwork ->
                                 updateCurrentArtwork(artwork)
                             }
                     }
