@@ -41,6 +41,7 @@ import com.google.firebase.analytics.analytics
 import com.google.firebase.analytics.logEvent
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.callbackFlow
 import net.nurik.roman.muzei.BuildConfig
 import net.nurik.roman.muzei.R
@@ -48,6 +49,13 @@ import net.nurik.roman.muzei.databinding.MuzeiActivityBinding
 
 private const val PREVIEW_MODE = "android.service.wallpaper.PREVIEW_MODE"
 val Activity.isPreviewMode get() = intent?.extras?.getBoolean(PREVIEW_MODE) == true
+
+/**
+ * Whether [MuzeiActivity] is in the foreground. Its window shows the live wallpaper
+ * (windowShowWallpaper), so while it's visible the app — not the home launcher — hosts the
+ * wallpaper, which the wallpaper engine uses to decide when notifyColorsChanged() is safe.
+ */
+val MuzeiActivityVisible = MutableStateFlow(false)
 
 class MuzeiActivity : AppCompatActivity() {
     private lateinit var binding: MuzeiActivityBinding
@@ -156,6 +164,16 @@ class MuzeiActivity : AppCompatActivity() {
             NotificationSettingsDialogFragment.showSettings(this,
                     supportFragmentManager)
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        MuzeiActivityVisible.value = true
+    }
+
+    override fun onStop() {
+        super.onStop()
+        MuzeiActivityVisible.value = false
     }
 
     override fun onPostResume() {
