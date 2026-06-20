@@ -488,10 +488,26 @@ class MuzeiBlurRenderer(
             scaledHeight = max(2, (scaledHeight * downscale).toInt().floorEven()).coerceAtMost(MAX_BLUR_SOURCE_DIM)
             scaledWidth = max(4, (scaledWidth * downscale).toInt().roundMult4()).coerceAtMost(MAX_BLUR_SOURCE_DIM)
         }
-        val tempBitmap = imageLoader.decode(scaledWidth, scaledHeight)
+        // blurredSampleSize is >= 4, so the blur source is normally much smaller than the sharp
+        // picture we already decoded above. Downscale that in-memory bitmap rather than opening the
+        // stream and decompressing the file a second time (an IPC + decode for content URIs). The
+        // result is Gaussian-blurred at draw time, so the slight quality difference vs a fresh decode
+        // is irrelevant. Fall back to a fresh decode only if the sharp picture was shrunk past the
+        // blur target by the OOM back-off above and so can't cover these dimensions.
+        val tempBitmap = if (sharp.width >= scaledWidth && sharp.height >= scaledHeight) {
+            sharp
+        } else {
+            imageLoader.decode(scaledWidth, scaledHeight)
+        }
         val blurSource: Bitmap? = if (tempBitmap != null && tempBitmap.width != 0 && tempBitmap.height != 0) {
-            val scaledBitmap = tempBitmap.scale(scaledWidth, scaledHeight)
-            if (tempBitmap != scaledBitmap) {
+            // scale() returns the source untouched when it already matches the target size; copy in
+            // that case so the blur source is always its own bitmap (sharp and blurSource are each
+            // recycled independently, so they must never alias the same instance).
+            val scaledBitmap = tempBitmap.scale(scaledWidth, scaledHeight).let { scaled ->
+                if (scaled === sharp) scaled.copy(scaled.config ?: Bitmap.Config.ARGB_8888, false) else scaled
+            }
+            // Never recycle the shared sharp bitmap here; only a dedicated decode is ours to free.
+            if (tempBitmap !== sharp && tempBitmap != scaledBitmap) {
                 tempBitmap.recycle()
             }
             // Reuse this small, fully-decoded bitmap for the darkness calculation rather than
