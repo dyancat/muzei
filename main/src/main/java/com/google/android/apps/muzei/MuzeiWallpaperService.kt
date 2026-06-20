@@ -166,6 +166,12 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
         private lateinit var renderer: MuzeiBlurRenderer
         private lateinit var renderController: RenderController
         private var currentArtworkColors: WallpaperColors? = null
+        // notifyColorsChanged() only causes a launcher offset jump when the home launcher is
+        // hosting the visible wallpaper. It's deferred until then and flushed once we reach a safe
+        // state — surface hidden, or the lock screen (keyguard) hosting (see flushPendingColors).
+        private var surfaceVisible = false
+        private var lockScreenVisible = false
+        private var pendingColorsChanged = false
 
         private var validDoubleTap: Boolean = false
         private var lastThreeFingerTap = 0L
@@ -293,7 +299,16 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
                 image.recycle()
                 colors
             } ?: return
-            notifyColorsChanged()
+            // The launcher reacts to notifyColorsChanged() by re-pushing wallpaper offsets — a
+            // visible jump we can't filter out — but only while it's hosting the visible home
+            // wallpaper. That's the case only when the surface is visible, not on the lock screen
+            // (keyguard hosts), and not with the Muzei app foreground (its window hosts via
+            // windowShowWallpaper). In every other state it's safe to notify now.
+            if (surfaceVisible && !lockScreenVisible && !MuzeiActivityVisible.value) {
+                pendingColorsChanged = true
+            } else {
+                notifyColorsChanged()
+            }
         }
 
         /**
@@ -321,6 +336,17 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
         override fun onComputeColors(): WallpaperColors? =
             currentArtworkColors ?: super.onComputeColors()
 
+        /** Publishes a deferred colours update. Only call from a state where notifyColorsChanged()
+         *  won't cause the launcher offset jump (surface hidden, or lock screen hosting). */
+        private fun flushPendingColors() {
+            if (pendingColorsChanged) {
+                pendingColorsChanged = false
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                    notifyColorsChanged()
+                }
+            }
+        }
+
         override fun onSurfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
             super.onSurfaceChanged(holder, format, width, height)
             if (!isPreview) {
@@ -339,6 +365,12 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
         }
 
         fun lockScreenVisibleChanged(isLockScreenVisible: Boolean) {
+            lockScreenVisible = isLockScreenVisible
+            if (isLockScreenVisible) {
+                // The keyguard (not the launcher) hosts the wallpaper now, so notifyColorsChanged()
+                // here won't cause the launcher offset jump — flush any deferred colours update.
+                flushPendingColors()
+            }
             // Crossfades that start while Muzei isn't the visible surface (e.g. unlocking to
             // an app rather than the home screen) used to stall and flicker on resume. That is
             // now handled by keeping the engine rendering in the background (onVisibilityChanged)
@@ -357,6 +389,12 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
             // RENDERMODE_WHEN_DIRTY means this only costs frames while an animation is actually
             // running — an idle background wallpaper still doesn't render.
             renderController.visible = true
+
+            surfaceVisible = visible
+            if (!visible) {
+                // Hidden now (screen off / another app) — safe to publish a deferred update.
+                flushPendingColors()
+            }
         }
 
         override fun onOffsetsChanged(
