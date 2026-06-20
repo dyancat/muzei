@@ -18,6 +18,7 @@ package com.google.android.apps.muzei.render
 
 import android.app.ActivityManager
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.RectF
 import android.opengl.GLES20
@@ -37,7 +38,12 @@ import com.google.android.apps.muzei.util.floorEven
 import com.google.android.apps.muzei.util.interpolate
 import com.google.android.apps.muzei.util.roundMult4
 import com.google.android.apps.muzei.util.uninterpolate
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 import kotlin.math.ceil
@@ -79,23 +85,30 @@ class MuzeiBlurRenderer(
     }
 
     private val blurKeyframes: Int
-    private var maxPrescaledBlurPixels: Int = 0
-    private var blurredSampleSize: Int = 0
-    private var maxDim: Int = 0
-    private var maxGrey: Int = 0
+    // Read from the background decode thread (see decode()), so kept volatile.
+    @Volatile private var maxPrescaledBlurPixels: Int = 0
+    @Volatile private var blurredSampleSize: Int = 0
+    @Volatile private var maxDim: Int = 0
+    @Volatile private var maxGrey: Int = 0
 
     // Model and view matrices. Projection and MVP stored in picture set
     private val modelMatrix = FloatArray(16)
     private val viewMatrix = FloatArray(16)
 
     private var aspectRatio: Float = 0f
-    private var currentHeight: Int = 0
+    @Volatile private var currentHeight: Int = 0
 
     private var currentGLPictureSet: GLPictureSet
     private var nextGLPictureSet: GLPictureSet
     private lateinit var colorOverlay: GLColorOverlay
 
     private var queuedNextImageLoader: ImageLoader? = null
+    // The next artwork is decoded and blurred off the GL thread so rendering (e.g. scrolling)
+    // stays smooth during a switch; only the texture upload runs on the GL thread. loadInProgress
+    // serialises with the crossfade, and loadGeneration discards a decode that's been superseded.
+    private val decodeScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private var loadInProgress = false
+    private var loadGeneration = 0
 
     private var surfaceCreated: Boolean = false
 
@@ -278,13 +291,43 @@ class MuzeiBlurRenderer(
             return
         }
 
-        if (crossfadeAnimator.isRunning && !immediate) {
+        if ((loadInProgress || crossfadeAnimator.isRunning) && !immediate) {
             queuedNextImageLoader = imageLoader
             return
         }
 
-        val (width, height) = imageLoader.getSize()
-        if (width == 0 || height == 0) {
+        val generation = ++loadGeneration
+        if (immediate) {
+            // Decode synchronously so the switch is instant (e.g. lock-screen transitions).
+            loadInProgress = false
+            present(decode(imageLoader), immediate = true)
+            return
+        }
+
+        // Decode and blur off the GL thread so rendering stays smooth during the switch; only the
+        // texture upload (in present) runs on the GL thread.
+        loadInProgress = true
+        decodeScope.launch {
+            val decoded = decode(imageLoader)
+            callbacks.queueEventOnGlThread {
+                if (generation != loadGeneration) {
+                    // Superseded by a newer load; throw this one away.
+                    decoded?.recycle()
+                    return@queueEventOnGlThread
+                }
+                loadInProgress = false
+                present(decoded, immediate = false)
+            }
+        }
+    }
+
+    private fun present(decoded: DecodedArtwork?, immediate: Boolean) {
+        if (decoded == null) {
+            return
+        }
+        if (!surfaceCreated) {
+            // Surface went away while we were decoding.
+            decoded.recycle()
             return
         }
 
@@ -295,13 +338,13 @@ class MuzeiBlurRenderer(
 
         if (!demoMode && !preview) {
             SwitchingPhotosStateFlow.value = SwitchingPhotosInProgress(nextGLPictureSet.id)
-            ArtworkSizeStateFlow.value = ArtworkSize(width, height)
+            ArtworkSizeStateFlow.value = ArtworkSize(decoded.width, decoded.height)
             ArtDetailViewport.setDefaultViewport(nextGLPictureSet.id,
-                    width * 1f / height,
+                    decoded.width * 1f / decoded.height,
                     aspectRatio)
         }
 
-        nextGLPictureSet.load(imageLoader)
+        nextGLPictureSet.applyDecoded(decoded)
 
         crossfadeAnimator.start(if (immediate) 1 else 0, 1) {
             // swap current and next picturesets
@@ -313,7 +356,6 @@ class MuzeiBlurRenderer(
             if (!demoMode) {
                 SwitchingPhotosStateFlow.value = SwitchingPhotosDone(currentGLPictureSet.id)
             }
-            System.gc()
             val loader = queuedNextImageLoader
             if (loader != null) {
                 queuedNextImageLoader = null
@@ -321,6 +363,112 @@ class MuzeiBlurRenderer(
             }
         }
         callbacks.requestRender()
+    }
+
+    /**
+     * Decodes and blurs [imageLoader] into bitmaps ready for upload. Does no GL work, so it can run
+     * off the GL thread; the result is handed to [present] / [GLPictureSet.applyDecoded] which do
+     * the texture upload on the GL thread. Returns null if the image can't be decoded.
+     */
+    private fun decode(imageLoader: ImageLoader): DecodedArtwork? {
+        val (width, height) = imageLoader.getSize()
+        if (width == 0 || height == 0) {
+            return null
+        }
+        val bitmapAspectRatio = width * 1f / height
+
+        // Calculate image darkness to determine dim amount
+        val darknessBitmap = imageLoader.decode(64)
+        val darkness = darknessBitmap.darkness()
+        darknessBitmap?.recycle()
+        val dimAmount = if (demoMode)
+            DEMO_DIM
+        else
+            (maxDim * (1 - DIM_RANGE + DIM_RANGE * sqrt(darkness.toDouble()))).toInt()
+
+        // Decode the sharp picture, backing off the resolution if we run out of memory
+        val targetHeight = currentHeight
+        var sharp: Bitmap? = null
+        var sampleSize = 1
+        var attempted = false
+        while (!attempted) {
+            val attemptedWidth = (bitmapAspectRatio * targetHeight / sampleSize).toInt()
+            val attemptedHeight = targetHeight / sampleSize
+            try {
+                sharp = imageLoader.decode(attemptedWidth, attemptedHeight)
+                attempted = true
+            } catch (_: OutOfMemoryError) {
+                sampleSize = sampleSize shl 1
+                Log.d(TAG, "Decoding image at ${attemptedWidth}x$attemptedHeight " +
+                        "was too large, trying a sample size of $sampleSize")
+            }
+        }
+        if (sharp == null) {
+            return null
+        }
+
+        val blurredFrames: Array<Bitmap?>? = if (maxPrescaledBlurPixels == 0 && maxGrey == 0) {
+            // No blur or grey: every keyframe reuses the sharp picture.
+            null
+        } else {
+            val sampleSizeTargetHeight = if (maxPrescaledBlurPixels > 0) {
+                targetHeight / blurredSampleSize
+            } else {
+                targetHeight
+            }
+            // Note that image width should be a multiple of 4 to avoid
+            // issues with RenderScript allocations.
+            val scaledHeight = max(2, sampleSizeTargetHeight.floorEven())
+            val scaledWidth = max(4, (scaledHeight * bitmapAspectRatio).toInt().roundMult4())
+
+            // To blur, first load the entire bitmap region at a sample size appropriate for the
+            // final blurred image, then scale it down so the blur radius looks right.
+            val tempBitmap = imageLoader.decode(scaledWidth, scaledHeight)
+            if (tempBitmap != null && tempBitmap.width != 0 && tempBitmap.height != 0) {
+                val scaledBitmap = tempBitmap.scale(scaledWidth, scaledHeight)
+                if (tempBitmap != scaledBitmap) {
+                    tempBitmap.recycle()
+                }
+
+                // Create a blurred copy for each keyframe.
+                val blurrer = ImageBlurrer(context, scaledBitmap)
+                val frames = arrayOfNulls<Bitmap>(blurKeyframes)
+                for (f in 1..blurKeyframes) {
+                    val desaturateAmount = maxGrey / 500f * f / blurKeyframes
+                    val blurRadius = if (maxPrescaledBlurPixels > 0) {
+                        blurRadiusAtFrame(f.toFloat())
+                    } else {
+                        0f
+                    }
+                    frames[f - 1] = blurrer.blurBitmap(blurRadius, desaturateAmount)
+                }
+                blurrer.destroy()
+                scaledBitmap.recycle()
+                frames
+            } else {
+                Log.e(TAG, "ImageLoader failed to decode the image")
+                arrayOfNulls(blurKeyframes)
+            }
+        }
+
+        return DecodedArtwork(sharp, blurredFrames, dimAmount, bitmapAspectRatio, width, height)
+    }
+
+    /** Bitmaps decoded off the GL thread, awaiting texture upload (see [decode]/[present]). */
+    private class DecodedArtwork(
+            val sharp: Bitmap,
+            // One bitmap per blur keyframe (index 0 == keyframe 1); null entries draw nothing.
+            // A null array means every keyframe reuses the sharp picture (no blur or grey).
+            val blurredFrames: Array<Bitmap?>?,
+            val dimAmount: Int,
+            val bitmapAspectRatio: Float,
+            val width: Int,
+            val height: Int
+    ) {
+        fun recycle() {
+            sharp.recycle()
+            blurredFrames?.forEach { it?.recycle() }
+        }
     }
 
     private inner class GLPictureSet(val id: Int) {
@@ -331,109 +479,40 @@ class MuzeiBlurRenderer(
         private var bitmapAspectRatio = 1f
         var dimAmount = 0
 
-        fun load(imageLoader: ImageLoader) {
-            val (width, height) = imageLoader.getSize()
-            hasBitmap = width != 0 && height != 0
-            bitmapAspectRatio = if (hasBitmap)
-                width * 1f / height
-            else
-                1f
-
-            dimAmount = DEFAULT_MAX_DIM
-
+        /**
+         * Uploads the already-decoded [decoded] bitmaps as GL textures (the only part that must
+         * run on the GL thread) and recycles them. The decode/blur happened off-thread in [decode].
+         */
+        fun applyDecoded(decoded: DecodedArtwork) {
             destroyPictures()
 
-            if (hasBitmap) {
-                // Calculate image darkness to determine dim amount
-                var tempBitmap = imageLoader.decode(64)
-                val darkness = tempBitmap.darkness()
-                dimAmount = if (demoMode)
-                    DEMO_DIM
-                else
-                    (maxDim * (1 - DIM_RANGE + DIM_RANGE * sqrt(darkness.toDouble()))).toInt()
-                tempBitmap?.recycle()
+            hasBitmap = true
+            bitmapAspectRatio = decoded.bitmapAspectRatio
+            dimAmount = decoded.dimAmount
 
-                // Create the GLPicture objects
-                var success = false
-                var sampleSize = 1
-                do {
-                    val attemptedWidth = (bitmapAspectRatio * currentHeight / sampleSize).toInt()
-                    val attemptedHeight = currentHeight / sampleSize
-                    try {
-                        val image = imageLoader.decode(
-                                attemptedWidth,
-                                attemptedHeight)
-                        pictures[0] = image?.toGLPicture()
-                        success = true
-                    } catch (_: OutOfMemoryError) {
-                        sampleSize = sampleSize shl 1
-                        Log.d(TAG, "Decoding image at ${attemptedWidth}x$attemptedHeight " +
-                                "was too large, trying a sample size of $sampleSize")
-                    }
-                } while (!success)
-                if (maxPrescaledBlurPixels == 0 && maxGrey == 0) {
-                    for (f in 1..blurKeyframes) {
-                        pictures[f] = pictures[0]
-                    }
-                } else {
-                    val sampleSizeTargetHeight: Int = if (maxPrescaledBlurPixels > 0) {
-                        currentHeight / blurredSampleSize
-                    } else {
-                        currentHeight
-                    }
-                    // Note that image width should be a multiple of 4 to avoid
-                    // issues with RenderScript allocations.
-                    val scaledHeight = max(2, sampleSizeTargetHeight.floorEven())
-                    val scaledWidth = max(4, (scaledHeight * bitmapAspectRatio).toInt().roundMult4())
-
-                    // To blur, first load the entire bitmap region, but at a very large
-                    // sample size that's appropriate for the final blurred image
-                    tempBitmap = imageLoader.decode(scaledWidth, scaledHeight)
-
-                    if (tempBitmap != null
-                            && tempBitmap.width != 0 && tempBitmap.height != 0) {
-                        // Next, create a scaled down version of the bitmap so that the blur radius
-                        // looks appropriate (tempBitmap will likely be bigger than the final
-                        // blurred bitmap, and thus the blur may look smaller if we just used
-                        // tempBitmap as the final blurred bitmap).
-
-                        // Note that image width should be a multiple of 4 to avoid
-                        // issues with RenderScript allocations.
-                        val scaledBitmap = tempBitmap.scale(scaledWidth, scaledHeight)
-                        if (tempBitmap != scaledBitmap) {
-                            tempBitmap.recycle()
-                        }
-
-                        // And finally, create a blurred copy for each keyframe.
-                        val blurrer = ImageBlurrer(context, scaledBitmap)
-                        for (f in 1..blurKeyframes) {
-                            val desaturateAmount = maxGrey / 500f * f / blurKeyframes
-                            val blurRadius = if (maxPrescaledBlurPixels > 0) {
-                                blurRadiusAtFrame(f.toFloat())
-                            } else {
-                                0f
-                            }
-                            val blurredBitmap = blurrer.blurBitmap(blurRadius, desaturateAmount)
-                            pictures[f] = blurredBitmap?.toGLPicture()
-                            blurredBitmap?.recycle()
-                        }
-                        blurrer.destroy()
-
-                        scaledBitmap.recycle()
-                    } else {
-                        Log.e(TAG, "ImageLoader failed to decode the image")
-                        for (f in 1..blurKeyframes) {
-                            pictures[f] = null
-                        }
-                    }
+            pictures[0] = decoded.sharp.toGLPicture()
+            if (decoded.blurredFrames == null) {
+                // No blur or grey: every keyframe reuses the sharp picture.
+                for (f in 1..blurKeyframes) {
+                    pictures[f] = pictures[0]
+                }
+            } else {
+                for (f in 1..blurKeyframes) {
+                    pictures[f] = decoded.blurredFrames[f - 1]?.toGLPicture()
                 }
             }
 
+            decoded.recycle()
             recomputeTransformMatrices()
             callbacks.requestRender()
         }
 
         fun recomputeTransformMatrices() {
+            // Nothing to transform until this set has an image. Avoids recomputing the "next"
+            // (empty) picture set on every offset change while scrolling outside a crossfade.
+            if (!hasBitmap) {
+                return
+            }
             val screenToBitmapAspectRatio = aspectRatio / bitmapAspectRatio
             if (screenToBitmapAspectRatio == 0f) {
                 return
@@ -568,6 +647,7 @@ class MuzeiBlurRenderer(
     }
 
     fun destroy() {
+        decodeScope.cancel()
         currentGLPictureSet.destroyPictures()
         nextGLPictureSet.destroyPictures()
     }
@@ -581,15 +661,14 @@ class MuzeiBlurRenderer(
 
         blurRelatedToArtDetailMode = artDetailMode
         this.isBlurred = isBlurred
-        blurAnimator.start(endValue = if (isBlurred) blurKeyframes else 0) {
-            if (isBlurred && artDetailMode) {
-                System.gc()
-            }
-        }
+        blurAnimator.start(endValue = if (isBlurred) blurKeyframes else 0) {}
         callbacks.requestRender()
     }
 
-    fun interface Callbacks {
+    interface Callbacks {
         fun requestRender()
+
+        /** Posts [event] to run on the GL thread (used to upload off-thread decode results). */
+        fun queueEventOnGlThread(event: () -> Unit)
     }
 }
