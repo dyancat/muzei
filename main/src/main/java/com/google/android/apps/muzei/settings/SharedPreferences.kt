@@ -51,7 +51,7 @@ class PreferenceSourcedValue<T : Any>(
             userControlled = true
             updateJob?.cancel()
             updateJob = coroutineScope.launch {
-                delay(750)
+                delay(200)
                 updateValue(value)
                 updateJob = null
             }
