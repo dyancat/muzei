@@ -18,6 +18,25 @@ package com.google.android.apps.muzei.render
 
 import android.graphics.Bitmap
 import android.graphics.Color
+import androidx.core.graphics.ColorUtils
+
+/**
+ * Mean WCAG relative luminance (0 = black .. 1 = white) of the bitmap. Unlike [darkness], each
+ * pixel is gamma-corrected via [ColorUtils.calculateLuminance] — the same metric the framework's
+ * WallpaperColors uses for its dark-text decision — so values are perceptually accurate.
+ */
+fun Bitmap.relativeLuminance(): Float {
+    if (width == 0 || height == 0) {
+        return 0f
+    }
+    val pixels = IntArray(width * height)
+    getPixels(pixels, 0, width, 0, 0, width, height)
+    var total = 0.0
+    for (pixel in pixels) {
+        total += ColorUtils.calculateLuminance(pixel)
+    }
+    return (total / pixels.size).toFloat()
+}
 
 fun Bitmap?.darkness(): Float {
     if (this == null || width == 0 || height == 0) {
