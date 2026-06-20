@@ -102,12 +102,17 @@ object GLUtil {
     }
 
     fun checkGlError(glOperation: String) {
+        // glGetError() forces a synchronous flush of the GL pipeline, so only pay that cost on
+        // debug builds. This is called per-draw and per-tile in the frame loop, so on a multi-tile
+        // wallpaper it would otherwise stall the pipeline dozens of times per frame. In release it
+        // only logged (it can't throw), so skipping the check entirely is harmless.
+        if (!BuildConfig.DEBUG) {
+            return
+        }
         var error: Int
         while (GLES20.glGetError().also { error = it } != GLES20.GL_NO_ERROR) {
             Log.e(TAG, "$glOperation: glError $error")
-            if (BuildConfig.DEBUG) {
-                throw RuntimeException("$glOperation: glError $error")
-            }
+            throw RuntimeException("$glOperation: glError $error")
         }
     }
 
