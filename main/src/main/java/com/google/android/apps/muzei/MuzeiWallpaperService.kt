@@ -23,6 +23,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Bitmap
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
@@ -42,6 +43,7 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.google.android.apps.muzei.featuredart.BuildConfig.FEATURED_ART_AUTHORITY
 import com.google.android.apps.muzei.notifications.NotificationUpdater
 import com.google.android.apps.muzei.render.ImageLoader
+import com.google.android.apps.muzei.render.relativeLuminance
 import com.google.android.apps.muzei.render.MuzeiBlurRenderer
 import com.google.android.apps.muzei.render.RealRenderController
 import com.google.android.apps.muzei.render.RenderController
@@ -82,7 +84,18 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
     companion object {
         private const val TEMPORARY_FOCUS_DURATION_MILLIS: Long = 3000
         private const val THREE_FINGER_TAP_INTERVAL_MS = 1000L
-        private const val MAX_ARTWORK_SIZE = 110 // px
+        // Resolution we decode the artwork at to extract colours. Larger than WallpaperColors
+        // strictly needs (~112px) so the thin status-bar strip we crop out still has some
+        // vertical resolution to average over.
+        private const val COLOR_DECODE_SIZE = 256 // px
+        // Fallback status bar height if the platform dimen can't be resolved.
+        private const val DEFAULT_STATUS_BAR_HEIGHT_DP = 24f
+        // Mean relative luminance (gamma-corrected, 0 = black .. 1 = white) the status-bar strip
+        // must reach for the system to use dark icons — our tunable replacement for fromBitmap()'s
+        // non-tunable internal calculation. Same metric the framework uses, where its (stricter,
+        // also dark-pixel-guarded) threshold is ~0.70. Higher => dark icons only over brighter
+        // artwork. (Only applied on API 31+, where the WallpaperColors hint can be set explicitly.)
+        private const val STATUS_BAR_DARK_ICON_MIN_LUMINANCE = 0.42f
     }
 
     private val wallpaperLifecycle = LifecycleRegistry(this)
@@ -153,6 +166,12 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
         private lateinit var renderer: MuzeiBlurRenderer
         private lateinit var renderController: RenderController
         private var currentArtworkColors: WallpaperColors? = null
+        // notifyColorsChanged() only causes a launcher offset jump when the home launcher is
+        // hosting the visible wallpaper. It's deferred until then and flushed once we reach a safe
+        // state — surface hidden, or the lock screen (keyguard) hosting (see flushPendingColors).
+        private var surfaceVisible = false
+        private var lockScreenVisible = false
+        private var pendingColorsChanged = false
 
         private var validDoubleTap: Boolean = false
         private var lastThreeFingerTap = 0L
@@ -250,18 +269,83 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
 
         @RequiresApi(Build.VERSION_CODES.O_MR1)
         private suspend fun updateCurrentArtwork(artwork: Artwork) {
-            val image = ImageLoader.decode(
-                    contentResolver, artwork.contentUri,
-                    MAX_ARTWORK_SIZE / 2) ?: return
+            val stripFraction = statusBarStripFraction()
             currentArtworkColors = withContext(Dispatchers.IO) {
-                WallpaperColors.fromBitmap(image)
+                val image = ImageLoader.decode(
+                        contentResolver, artwork.contentUri, COLOR_DECODE_SIZE)
+                        ?: return@withContext null
+                // Derive WallpaperColors — and in particular the HINT_SUPPORTS_DARK_TEXT flag
+                // that drives the status bar icon colour — from just the strip of the artwork
+                // sitting below the status bar, rather than the whole image. The artwork is
+                // cover-fit, so the top of the image lines up with the top of the screen.
+                val stripHeight = (image.height * stripFraction).toInt().coerceIn(1, image.height)
+                val strip = Bitmap.createBitmap(image, 0, 0, image.width, stripHeight)
+                val base = WallpaperColors.fromBitmap(strip)
+                val colors = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    // fromBitmap()'s own dark-text calculation isn't tunable, so decide the hint
+                    // ourselves from the strip's mean relative luminance and rebuild with the real
+                    // colours. (No dark-pixel-area guard, unlike the framework — mean only.)
+                    val luminance = strip.relativeLuminance()
+                    val hints = if (luminance >= STATUS_BAR_DARK_ICON_MIN_LUMINANCE) {
+                        WallpaperColors.HINT_SUPPORTS_DARK_TEXT
+                    } else {
+                        0
+                    }
+                    WallpaperColors(base.primaryColor, base.secondaryColor, base.tertiaryColor, hints)
+                } else {
+                    base
+                }
+                if (strip != image) strip.recycle()
+                image.recycle()
+                colors
+            } ?: return
+            // The launcher reacts to notifyColorsChanged() by re-pushing wallpaper offsets — a
+            // visible jump we can't filter out — but only while it's hosting the visible home
+            // wallpaper. That's the case only when the surface is visible, not on the lock screen
+            // (keyguard hosts), and not with the Muzei app foreground (its window hosts via
+            // windowShowWallpaper). In every other state it's safe to notify now.
+            if (surfaceVisible && !lockScreenVisible && !MuzeiActivityVisible.value) {
+                pendingColorsChanged = true
+            } else {
+                notifyColorsChanged()
             }
-            notifyColorsChanged()
+        }
+
+        /**
+         * Fraction of the wallpaper height occupied by the status bar, used to crop the strip
+         * of artwork whose luminance decides the status bar icon colour.
+         */
+        private fun statusBarStripFraction(): Float {
+            val res = resources
+            val resId = res.getIdentifier("status_bar_height", "dimen", "android")
+            val statusBarHeight = if (resId > 0) {
+                res.getDimensionPixelSize(resId)
+            } else {
+                (DEFAULT_STATUS_BAR_HEIGHT_DP * res.displayMetrics.density).toInt()
+            }
+            val screenHeight = WallpaperSizeStateFlow.value?.height
+                    ?: res.displayMetrics.heightPixels
+            return if (screenHeight > 0) {
+                (statusBarHeight.toFloat() / screenHeight).coerceIn(0.01f, 0.5f)
+            } else {
+                0.05f
+            }
         }
 
         @RequiresApi(Build.VERSION_CODES.O_MR1)
         override fun onComputeColors(): WallpaperColors? =
             currentArtworkColors ?: super.onComputeColors()
+
+        /** Publishes a deferred colours update. Only call from a state where notifyColorsChanged()
+         *  won't cause the launcher offset jump (surface hidden, or lock screen hosting). */
+        private fun flushPendingColors() {
+            if (pendingColorsChanged) {
+                pendingColorsChanged = false
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                    notifyColorsChanged()
+                }
+            }
+        }
 
         override fun onSurfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
             super.onSurfaceChanged(holder, format, width, height)
@@ -281,6 +365,12 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
         }
 
         fun lockScreenVisibleChanged(isLockScreenVisible: Boolean) {
+            lockScreenVisible = isLockScreenVisible
+            if (isLockScreenVisible) {
+                // The keyguard (not the launcher) hosts the wallpaper now, so notifyColorsChanged()
+                // here won't cause the launcher offset jump — flush any deferred colours update.
+                flushPendingColors()
+            }
             // Crossfades that start while Muzei isn't the visible surface (e.g. unlocking to
             // an app rather than the home screen) used to stall and flicker on resume. That is
             // now handled by keeping the engine rendering in the background (onVisibilityChanged)
@@ -299,6 +389,12 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
             // RENDERMODE_WHEN_DIRTY means this only costs frames while an animation is actually
             // running — an idle background wallpaper still doesn't render.
             renderController.visible = true
+
+            surfaceVisible = visible
+            if (!visible) {
+                // Hidden now (screen off / another app) — safe to publish a deferred update.
+                flushPendingColors()
+            }
         }
 
         override fun onOffsetsChanged(
