@@ -218,7 +218,9 @@ class MuzeiBlurRenderer(
 
         Matrix.setIdentityM(modelMatrix, 0)
 
-        val stillAnimating = crossfadeAnimator.tick() or blurAnimator.tick()
+        val (stillCrossFadeAnimating, onCrossFadeEnd) = crossfadeAnimator.tick()
+        val (stillBlurAnimating, onBlurEnd) = blurAnimator.tick()
+        val stillAnimating = stillCrossFadeAnimating or stillBlurAnimating
 
         if (blurRelatedToArtDetailMode) {
             currentGLPictureSet.recomputeTransformMatrices()
@@ -227,7 +229,7 @@ class MuzeiBlurRenderer(
 
         var dimAmount = currentGLPictureSet.dimAmount.toFloat()
         currentGLPictureSet.drawFrame(1f)
-        if (crossfadeAnimator.isRunning) {
+        if (crossfadeAnimator.isRunning || onCrossFadeEnd != null) {
             dimAmount = interpolate(dimAmount, nextGLPictureSet.dimAmount.toFloat(),
                     crossfadeAnimator.currentValue)
             nextGLPictureSet.drawFrame(crossfadeAnimator.currentValue)
@@ -239,6 +241,12 @@ class MuzeiBlurRenderer(
         if (stillAnimating) {
             callbacks.requestRender()
         }
+
+        // Run any animator end-callbacks only after the final frame has been drawn.
+        // crossfadeAnimator's onEnd swaps the current/next picture sets, so invoking it
+        // before drawing would render the swapped-in artwork a frame too early and flicker.
+        onCrossFadeEnd?.invoke()
+        onBlurEnd?.invoke()
     }
 
     @Keep
