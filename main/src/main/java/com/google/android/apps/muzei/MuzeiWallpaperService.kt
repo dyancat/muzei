@@ -23,6 +23,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Bitmap
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
@@ -42,6 +43,7 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.google.android.apps.muzei.featuredart.BuildConfig.FEATURED_ART_AUTHORITY
 import com.google.android.apps.muzei.notifications.NotificationUpdater
 import com.google.android.apps.muzei.render.ImageLoader
+import com.google.android.apps.muzei.render.relativeLuminance
 import com.google.android.apps.muzei.render.MuzeiBlurRenderer
 import com.google.android.apps.muzei.render.RealRenderController
 import com.google.android.apps.muzei.render.RenderController
@@ -82,7 +84,18 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
     companion object {
         private const val TEMPORARY_FOCUS_DURATION_MILLIS: Long = 3000
         private const val THREE_FINGER_TAP_INTERVAL_MS = 1000L
-        private const val MAX_ARTWORK_SIZE = 110 // px
+        // Resolution we decode the artwork at to extract colours. Larger than WallpaperColors
+        // strictly needs (~112px) so the thin status-bar strip we crop out still has some
+        // vertical resolution to average over.
+        private const val COLOR_DECODE_SIZE = 256 // px
+        // Fallback status bar height if the platform dimen can't be resolved.
+        private const val DEFAULT_STATUS_BAR_HEIGHT_DP = 24f
+        // Mean relative luminance (gamma-corrected, 0 = black .. 1 = white) the status-bar strip
+        // must reach for the system to use dark icons — our tunable replacement for fromBitmap()'s
+        // non-tunable internal calculation. Same metric the framework uses, where its (stricter,
+        // also dark-pixel-guarded) threshold is ~0.70. Higher => dark icons only over brighter
+        // artwork. (Only applied on API 31+, where the WallpaperColors hint can be set explicitly.)
+        private const val STATUS_BAR_DARK_ICON_MIN_LUMINANCE = 0.42f
     }
 
     private val wallpaperLifecycle = LifecycleRegistry(this)
@@ -250,13 +263,58 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
 
         @RequiresApi(Build.VERSION_CODES.O_MR1)
         private suspend fun updateCurrentArtwork(artwork: Artwork) {
-            val image = ImageLoader.decode(
-                    contentResolver, artwork.contentUri,
-                    MAX_ARTWORK_SIZE / 2) ?: return
+            val stripFraction = statusBarStripFraction()
             currentArtworkColors = withContext(Dispatchers.IO) {
-                WallpaperColors.fromBitmap(image)
-            }
+                val image = ImageLoader.decode(
+                        contentResolver, artwork.contentUri, COLOR_DECODE_SIZE)
+                        ?: return@withContext null
+                // Derive WallpaperColors — and in particular the HINT_SUPPORTS_DARK_TEXT flag
+                // that drives the status bar icon colour — from just the strip of the artwork
+                // sitting below the status bar, rather than the whole image. The artwork is
+                // cover-fit, so the top of the image lines up with the top of the screen.
+                val stripHeight = (image.height * stripFraction).toInt().coerceIn(1, image.height)
+                val strip = Bitmap.createBitmap(image, 0, 0, image.width, stripHeight)
+                val base = WallpaperColors.fromBitmap(strip)
+                val colors = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    // fromBitmap()'s own dark-text calculation isn't tunable, so decide the hint
+                    // ourselves from the strip's mean relative luminance and rebuild with the real
+                    // colours. (No dark-pixel-area guard, unlike the framework — mean only.)
+                    val luminance = strip.relativeLuminance()
+                    val hints = if (luminance >= STATUS_BAR_DARK_ICON_MIN_LUMINANCE) {
+                        WallpaperColors.HINT_SUPPORTS_DARK_TEXT
+                    } else {
+                        0
+                    }
+                    WallpaperColors(base.primaryColor, base.secondaryColor, base.tertiaryColor, hints)
+                } else {
+                    base
+                }
+                if (strip != image) strip.recycle()
+                image.recycle()
+                colors
+            } ?: return
             notifyColorsChanged()
+        }
+
+        /**
+         * Fraction of the wallpaper height occupied by the status bar, used to crop the strip
+         * of artwork whose luminance decides the status bar icon colour.
+         */
+        private fun statusBarStripFraction(): Float {
+            val res = resources
+            val resId = res.getIdentifier("status_bar_height", "dimen", "android")
+            val statusBarHeight = if (resId > 0) {
+                res.getDimensionPixelSize(resId)
+            } else {
+                (DEFAULT_STATUS_BAR_HEIGHT_DP * res.displayMetrics.density).toInt()
+            }
+            val screenHeight = WallpaperSizeStateFlow.value?.height
+                    ?: res.displayMetrics.heightPixels
+            return if (screenHeight > 0) {
+                (statusBarHeight.toFloat() / screenHeight).coerceIn(0.01f, 0.5f)
+            } else {
+                0.05f
+            }
         }
 
         @RequiresApi(Build.VERSION_CODES.O_MR1)
