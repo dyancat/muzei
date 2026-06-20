@@ -281,6 +281,11 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
         }
 
         fun lockScreenVisibleChanged(isLockScreenVisible: Boolean) {
+            // Crossfades that start while Muzei isn't the visible surface (e.g. unlocking to
+            // an app rather than the home screen) used to stall and flicker on resume. That is
+            // now handled by keeping the engine rendering in the background (onVisibilityChanged)
+            // and deferring the animator's onEnd until after the final frame is drawn
+            // (TickingFloatAnimator / MuzeiBlurRenderer.onDrawFrame).
             if (!EffectsLockScreenOpen.value) {
                 renderController.onLockScreen = isLockScreenVisible
             }
