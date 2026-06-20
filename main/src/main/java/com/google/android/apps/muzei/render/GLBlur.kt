@@ -19,6 +19,8 @@ package com.google.android.apps.muzei.render
 import android.graphics.Bitmap
 import android.opengl.GLES20
 import java.nio.FloatBuffer
+import kotlin.math.exp
+import kotlin.math.max
 
 /**
  * Real-time two-pass separable Gaussian blur on the GPU. Holds a single (non-tiled) source
@@ -37,6 +39,10 @@ internal class GLBlur {
         // taps cheaply.
         internal const val MAX_RADIUS = 32
 
+        // Each shader iteration covers a pair of texels with one bilinear fetch per side (see
+        // BLUR_FRAGMENT_SHADER), so the maximum number of tap-pairs is half the radius bound.
+        private const val MAX_TAPS = MAX_RADIUS / 2
+
         // Separable blur pass: samples 2*radius+1 taps along uStep, weighted by a Gaussian.
         private const val BLUR_VERTEX_SHADER = "" +
                 "attribute vec4 aPosition;" +
@@ -51,31 +57,27 @@ internal class GLBlur {
                 "precision mediump float;" +
                 "uniform sampler2D uTexture;" +
                 "uniform vec2 uStep;" +     // texel step along the blur axis (1/size, 0) or (0, 1/size)
-                "uniform float uRadius;" +  // blur radius in texels
+                "uniform int uTapCount;" +  // number of active tap-pairs (<= MAX_TAPS)
+                "uniform float uCenterWeight;" +              // normalized weight of the center tap
+                "uniform float uWeights[" + MAX_TAPS + "];" + // normalized weight per tap-pair
+                "uniform float uOffsets[" + MAX_TAPS + "];" + // centroid distance (in texels) per pair
                 "varying vec2 vTexCoords;" +
                 "void main(){" +
-                "  float s = max(uRadius, 0.0001) * 0.5;" +
-                "  float twoSigmaSq = 2.0 * s * s;" +
-                "  vec4 sum = texture2D(uTexture, vTexCoords);" +  // center tap, weight 1
-                "  float wsum = 1.0;" +
-                // Linear-sampling Gaussian: each iteration covers a pair of taps (i1, i2) with a
-                // single bilinear fetch per side, placed at the weight-centroid between the two
-                // texels so the hardware interpolation returns exactly w1*texel(i1)+w2*texel(i2).
-                // This halves the texture fetches for an identical result. i1 <= uRadius keeps
-                // w1 >= exp(-2) > 0, so the centroid divide is always safe.
-                "  for (int k = 1; k <= " + (MAX_RADIUS / 2) + "; k++) {" +
-                "    float i1 = float(2 * k - 1);" +
-                "    if (i1 > uRadius) break;" +
-                "    float i2 = float(2 * k);" +
-                "    float w1 = exp(-i1 * i1 / twoSigmaSq);" +
-                "    float w2 = (i2 > uRadius) ? 0.0 : exp(-i2 * i2 / twoSigmaSq);" +
-                "    float cw = w1 + w2;" +
-                "    vec2 off = uStep * ((i1 * w1 + i2 * w2) / cw);" +
-                "    sum += texture2D(uTexture, vTexCoords + off) * cw;" +
-                "    sum += texture2D(uTexture, vTexCoords - off) * cw;" +
-                "    wsum += 2.0 * cw;" +
+                // Linear-sampling Gaussian: each iteration covers a pair of taps with a single
+                // bilinear fetch per side, placed at the weight-centroid between the two texels so
+                // the hardware interpolation returns the exact pair sum. This halves the texture
+                // fetches. The Gaussian weights and centroid offsets depend only on the radius (a
+                // per-pass constant), so they're precomputed on the CPU (see uploadWeights) and
+                // arrive already normalized — the shader does only fetches and multiply-adds, with
+                // no per-fragment exp() or divide.
+                "  vec4 sum = texture2D(uTexture, vTexCoords) * uCenterWeight;" +
+                "  for (int k = 0; k < " + MAX_TAPS + "; k++) {" +
+                "    if (k >= uTapCount) break;" +
+                "    vec2 off = uStep * uOffsets[k];" +
+                "    sum += (texture2D(uTexture, vTexCoords + off)" +
+                "          + texture2D(uTexture, vTexCoords - off)) * uWeights[k];" +
                 "  }" +
-                "  gl_FragColor = sum / wsum;" +
+                "  gl_FragColor = sum;" +
                 "}"
 
         // Composite pass: draws the blurred texture through the MVP, applying alpha and desaturation.
@@ -125,7 +127,15 @@ internal class GLBlur {
         private var blurTexCoordsHandle = 0
         private var blurTextureHandle = 0
         private var blurStepHandle = 0
-        private var blurRadiusHandle = 0
+        private var blurTapCountHandle = 0
+        private var blurCenterWeightHandle = 0
+        private var blurWeightsHandle = 0
+        private var blurOffsetsHandle = 0
+
+        // Scratch buffers for the CPU-side Gaussian weights/offsets, reused across reblurs. The
+        // blur only ever runs on the GL thread, so a single shared pair is safe.
+        private val weights = FloatArray(MAX_TAPS)
+        private val offsets = FloatArray(MAX_TAPS)
 
         private var compositeProgram = 0
         private var compositePositionHandle = 0
@@ -147,7 +157,10 @@ internal class GLBlur {
             blurTexCoordsHandle = GLES20.glGetAttribLocation(blurProgram, "aTexCoords")
             blurTextureHandle = GLES20.glGetUniformLocation(blurProgram, "uTexture")
             blurStepHandle = GLES20.glGetUniformLocation(blurProgram, "uStep")
-            blurRadiusHandle = GLES20.glGetUniformLocation(blurProgram, "uRadius")
+            blurTapCountHandle = GLES20.glGetUniformLocation(blurProgram, "uTapCount")
+            blurCenterWeightHandle = GLES20.glGetUniformLocation(blurProgram, "uCenterWeight")
+            blurWeightsHandle = GLES20.glGetUniformLocation(blurProgram, "uWeights")
+            blurOffsetsHandle = GLES20.glGetUniformLocation(blurProgram, "uOffsets")
 
             compositeProgram = GLUtil.createAndLinkProgram(
                     GLUtil.loadShader(GLES20.GL_VERTEX_SHADER, COMPOSITE_VERTEX_SHADER),
@@ -174,6 +187,50 @@ internal class GLBlur {
         fun setScreenSize(width: Int, height: Int) {
             screenWidth = width
             screenHeight = height
+        }
+
+        /**
+         * Computes the linear-sampling Gaussian weights and centroid offsets for [radiusPx] into the
+         * shared [weights]/[offsets] scratch buffers and uploads them (plus the tap count and center
+         * weight) to the currently bound blur program. All values are normalized so the shader needs
+         * no final divide. Returns nothing; call once per reblur before the two passes.
+         *
+         * This mirrors the Gaussian the fragment shader used to evaluate per-fragment, but since the
+         * weights depend only on the radius (constant across the pass) it's hoisted here to the CPU,
+         * eliminating ~MAX_TAPS exp() calls and a divide for every fragment of both passes.
+         */
+        private fun uploadWeights(radiusPx: Float) {
+            val s = max(radiusPx, 0.0001f) * 0.5f
+            val twoSigmaSq = 2f * s * s
+            var wsum = 1f // center tap, pre-normalization weight 1
+            var tapCount = 0
+            // Each iteration pairs taps i1=2k-1 and i2=2k. i1 <= radiusPx keeps w1 >= exp(-2) > 0, so
+            // the centroid divide below is always safe.
+            var k = 1
+            while (k <= MAX_TAPS) {
+                val i1 = (2 * k - 1).toFloat()
+                if (i1 > radiusPx) break
+                val i2 = (2 * k).toFloat()
+                val w1 = exp(-i1 * i1 / twoSigmaSq)
+                val w2 = if (i2 > radiusPx) 0f else exp(-i2 * i2 / twoSigmaSq)
+                val cw = w1 + w2
+                weights[tapCount] = cw
+                offsets[tapCount] = (i1 * w1 + i2 * w2) / cw
+                wsum += 2f * cw
+                tapCount++
+                k++
+            }
+            // Normalize so the shader's weighted sum already integrates to 1.
+            val invWsum = 1f / wsum
+            for (j in 0 until tapCount) {
+                weights[j] *= invWsum
+            }
+            GLES20.glUniform1i(blurTapCountHandle, tapCount)
+            GLES20.glUniform1f(blurCenterWeightHandle, invWsum)
+            if (tapCount > 0) {
+                GLES20.glUniform1fv(blurWeightsHandle, tapCount, weights, 0)
+                GLES20.glUniform1fv(blurOffsetsHandle, tapCount, offsets, 0)
+            }
         }
     }
 
@@ -268,7 +325,9 @@ internal class GLBlur {
         GLES20.glVertexAttribPointer(blurPositionHandle, 3, GLES20.GL_FLOAT, false, 0, quadPositions)
         GLES20.glEnableVertexAttribArray(blurTexCoordsHandle)
         GLES20.glVertexAttribPointer(blurTexCoordsHandle, 2, GLES20.GL_FLOAT, false, 0, blurTexCoords)
-        GLES20.glUniform1f(blurRadiusHandle, radiusPx)
+        // The Gaussian weights/offsets are the same for both passes (only uStep differs), so compute
+        // and upload them once here rather than per-fragment in the shader.
+        uploadWeights(radiusPx)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glUniform1i(blurTextureHandle, 0)
         GLES20.glViewport(0, 0, width, height)
