@@ -408,6 +408,14 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
         ) {
             super.onOffsetsChanged(xOffset, yOffset, xOffsetStep, yOffsetStep, xPixelOffset,
                     yPixelOffset)
+            // While the keyguard hosts the wallpaper it pushes a centered offset (0.5). Normally
+            // unseen (RENDERMODE_WHEN_DIRTY → no redraw while locked), but a "next artwork"
+            // crossfade keeps the engine rendering in the background (see onVisibilityChanged),
+            // so the centering would get drawn and snap the viewport to the middle mid-animation.
+            // Keep the last home-screen offset until the launcher is hosting the wallpaper again.
+            if (lockScreenVisible) {
+                return
+            }
             renderer.setNormalOffsetX(xOffset)
         }
 
