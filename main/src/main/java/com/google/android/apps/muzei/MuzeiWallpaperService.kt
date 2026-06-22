@@ -175,6 +175,14 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
         private var surfaceVisible = false
         private var lockScreenVisible = false
         private var pendingColorsChanged = false
+        // The dark-text hint we last published — state for the hint-flip notification gate in
+        // updateCurrentArtwork(). We only extract WallpaperColors to drive the status-bar icon
+        // colour (HINT_SUPPORTS_DARK_TEXT), so we notify only when that hint flips — never for
+        // colour-only changes. Each notifyColorsChanged() that reaches Nova Launcher costs it
+        // memory (it leaks per wallpaper-colours callback), so suppressing every notification that
+        // wouldn't change the hint is the main lever we have to stop walking it toward an OOM.
+        // Delete this field together with that gate to notify on every change.
+        private var lastNotifiedHints: Int = Int.MIN_VALUE
 
         private var validDoubleTap: Boolean = false
         private var lastThreeFingerTap = 0L
@@ -302,6 +310,19 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
                 image.recycle()
                 colors
             } ?: return
+            // --- hint-flip notification gate: delete this whole block to notify on every change ---
+            // Notify only when the dark-text hint flips. Colours change on every artwork but we
+            // don't act on them, so a notifyColorsChanged() that wouldn't change the hint is pure
+            // waste that, repeated, leaks Nova Launcher toward an OOM. onComputeColors() still
+            // returns the latest colours, so the next real hint flip publishes them anyway.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val hints = currentArtworkColors?.colorHints ?: 0
+                if (hints == lastNotifiedHints) {
+                    return
+                }
+                lastNotifiedHints = hints
+            }
+            // --- end hint-flip notification gate ---
             // The launcher reacts to notifyColorsChanged() by re-pushing wallpaper offsets — a
             // visible jump we can't filter out — but only while it's hosting the visible home
             // wallpaper. That's the case only when the surface is visible, not on the lock screen
