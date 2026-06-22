@@ -27,10 +27,12 @@ import androidx.lifecycle.viewModelScope
 import com.google.android.apps.muzei.room.Artwork
 import com.google.android.apps.muzei.room.getInstalledProviders
 import com.google.android.apps.muzei.util.ContentProviderClientCompat
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.debounce
@@ -38,6 +40,7 @@ import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.shareIn
+import kotlinx.coroutines.flow.withIndex
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
@@ -49,9 +52,11 @@ class BrowseProviderViewModel(
 
     private val args = BrowseProviderFragmentArgs.fromSavedStateHandle(savedStateHandle)
 
-    val providerInfo = getInstalledProviders(application).debounce(1000L).map { providers ->
-        providers.firstOrNull { it.authority == args.contentUri.authority }
-    }
+    val providerInfo = getInstalledProviders(application)
+        .debounceExceptFirst(PROVIDER_CHANGE_DEBOUNCE)
+        .map { providers ->
+            providers.firstOrNull { it.authority == args.contentUri.authority }
+        }
 
     val client = providerInfo.map { providerInfo ->
         providerInfo?.let {
@@ -68,7 +73,9 @@ class BrowseProviderViewModel(
         var refreshJob: Job? = null
         val refreshArt = {
             refreshJob?.cancel()
-            refreshJob = launch {
+            // Query + cursor parsing is a binder IPC plus per-row object creation; keep it off
+            // the main thread so opening the screen doesn't block on it.
+            refreshJob = launch(Dispatchers.IO) {
                 try {
                     val list = mutableListOf<Artwork>()
                     contentProviderClient.query(args.contentUri)?.use { data ->
@@ -115,4 +122,20 @@ class BrowseProviderViewModel(
             emptyFlow()
         }
     }.shareIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), 1)
+
+    companion object {
+        // Coalesce the burst of package broadcasts during a provider install/update, but let the
+        // initial (already-current) provider list through immediately so the screen loads at once.
+        private const val PROVIDER_CHANGE_DEBOUNCE = 1000L
+
+        /**
+         * Like [debounce], but emits the first value immediately instead of waiting out the
+         * timeout. A plain [debounce] delays every emission, so it held back the initial provider
+         * list for a full second on every screen open, showing an empty grid until it elapsed.
+         */
+        private fun <T> Flow<T>.debounceExceptFirst(timeoutMillis: Long): Flow<T> =
+            withIndex()
+                .debounce { (index, _) -> if (index == 0) 0L else timeoutMillis }
+                .map { it.value }
+    }
 }
