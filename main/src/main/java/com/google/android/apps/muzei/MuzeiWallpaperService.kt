@@ -31,6 +31,8 @@ import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.ViewConfiguration
+import android.view.WindowInsets
+import android.view.WindowManager
 import androidx.annotation.RequiresApi
 import androidx.core.content.ContextCompat
 import androidx.core.os.UserManagerCompat
@@ -318,12 +320,15 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
          */
         private fun statusBarStripFraction(): Float {
             val res = resources
-            val resId = res.getIdentifier("status_bar_height", "dimen", "android")
-            val statusBarHeight = if (resId > 0) {
-                res.getDimensionPixelSize(resId)
+            // Prefer the real status bar inset (accounts for cutouts, foldables, per-display
+            // differences) where available; fall back to a dp estimate below API 30.
+            val statusBarHeight = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                getSystemService(WindowManager::class.java).currentWindowMetrics
+                        .windowInsets.getInsets(WindowInsets.Type.statusBars()).top
+                        .takeIf { it > 0 }
             } else {
-                (DEFAULT_STATUS_BAR_HEIGHT_DP * res.displayMetrics.density).toInt()
-            }
+                null
+            } ?: (DEFAULT_STATUS_BAR_HEIGHT_DP * res.displayMetrics.density).toInt()
             val screenHeight = WallpaperSizeStateFlow.value?.height
                     ?: res.displayMetrics.heightPixels
             return if (screenHeight > 0) {
