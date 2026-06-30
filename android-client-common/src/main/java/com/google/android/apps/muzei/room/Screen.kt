@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google Inc.
+ * Copyright 2026 Google Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,15 +16,19 @@
 
 package com.google.android.apps.muzei.room
 
-import androidx.room.Entity
-import androidx.room.PrimaryKey
-
 /**
- * Provider information's representation in Room
+ * The screen a provider selection applies to. Persisted as [value] in the
+ * provider table's primary key so the home and lock screens can each use a
+ * different provider.
+ *
+ * The absence of a [LOCK] row means the lock screen is "linked" to the home
+ * screen and falls back to the [HOME] selection.
  */
-@Entity(tableName = "provider")
-data class Provider(
-        @field:PrimaryKey
-        val screen: Int,
-        val authority: String,
-        var supportsNextArtwork: Boolean = false)
+enum class Screen(val value: Int) {
+    HOME(0),
+    LOCK(1);
+
+    companion object {
+        fun fromValue(value: Int): Screen = entries.first { it.value == value }
+    }
+}

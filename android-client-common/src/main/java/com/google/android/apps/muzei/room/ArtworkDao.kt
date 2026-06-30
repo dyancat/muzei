@@ -31,29 +31,50 @@ abstract class ArtworkDao {
     @Query("SELECT * FROM artwork ORDER BY date_added DESC LIMIT 100")
     abstract suspend fun getArtwork(): List<Artwork>
 
+    // The no-arg queries below describe the HOME screen (provider.screen = 0), keeping
+    // their original "the current artwork" meaning for existing callers. New per-screen
+    // call sites use the :screen overloads.
     @Query("""
-        SELECT artwork.* FROM artwork 
+        SELECT artwork.* FROM artwork
         inner join provider on providerAuthority = authority
+        WHERE provider.screen = 0
         ORDER BY date_added DESC""")
     abstract fun getCurrentArtworkFlow(): Flow<Artwork?>
 
     @Query("""
         SELECT artwork.* FROM artwork
         inner join provider on providerAuthority = authority
+        WHERE provider.screen = 0
         ORDER BY date_added DESC""")
     abstract fun getCurrentArtworkLiveData(): LiveData<Artwork?>
 
     @Query("""
         SELECT artwork.* FROM artwork
         inner join provider on providerAuthority = authority
+        WHERE provider.screen = 0
         ORDER BY date_added DESC""")
     internal abstract fun getCurrentArtworkBlocking(): Artwork?
 
     @Query("""
         SELECT artwork.* FROM artwork
         inner join provider on providerAuthority = authority
+        WHERE provider.screen = 0
         ORDER BY date_added DESC""")
     abstract suspend fun getCurrentArtwork(): Artwork?
+
+    @Query("""
+        SELECT artwork.* FROM artwork
+        inner join provider on providerAuthority = authority
+        WHERE provider.screen = :screen
+        ORDER BY date_added DESC""")
+    abstract fun getCurrentArtworkFlow(screen: Int): Flow<Artwork?>
+
+    @Query("""
+        SELECT artwork.* FROM artwork
+        inner join provider on providerAuthority = authority
+        WHERE provider.screen = :screen
+        ORDER BY date_added DESC""")
+    abstract suspend fun getCurrentArtwork(screen: Int): Artwork?
 
     @Insert
     abstract suspend fun insert(artwork: Artwork): Long

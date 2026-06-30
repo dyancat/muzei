@@ -100,8 +100,8 @@ class ArtworkLoadWorker(
     override suspend fun doWork() = withContext(syncSingleThreadContext) {
         // Load the artwork
         val database = MuzeiDatabase.getInstance(applicationContext)
-        val (authority) = database.providerDao()
-                .getCurrentProvider() ?: return@withContext Result.failure()
+        val authority = database.providerDao()
+                .getCurrentProvider()?.authority ?: return@withContext Result.failure()
         if (BuildConfig.DEBUG) {
             Log.d(TAG, "Artwork Load for $authority")
         }
