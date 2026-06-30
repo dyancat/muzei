@@ -63,6 +63,9 @@ class RealRenderController(
             homeArtworkUri = artwork.contentUri
             if (activeScreen == Screen.HOME) {
                 updateCurrentArtwork()
+            } else {
+                // Home is the inactive screen; keep its prefetch fresh.
+                prefetchInactiveScreen()
             }
         }
         // The lock flow is intentionally not filtered for null: a null means the
@@ -74,6 +77,9 @@ class RealRenderController(
             lockArtworkUri = artwork?.contentUri
             if (activeScreen == Screen.LOCK) {
                 updateCurrentArtwork()
+            } else {
+                // Lock is the inactive screen; keep its prefetch fresh.
+                prefetchInactiveScreen()
             }
         }
     }
@@ -98,6 +104,24 @@ class RealRenderController(
             // Keep the outgoing artwork's effects steady while it crossfades out.
             holdEffectsForScreenSwitch()
             reloadCurrentArtwork()
+        }
+        // Warm the other screen's artwork so the next switch is instant.
+        prefetchInactiveScreen()
+    }
+
+    /**
+     * Decode the inactive screen's artwork ahead of time so switching to it is a texture
+     * upload rather than a fresh decode. Skipped when the inactive screen resolves to the
+     * artwork already shown (e.g. the lock screen linked to home), so the common case adds
+     * no extra decode or memory.
+     */
+    private fun prefetchInactiveScreen() {
+        val inactiveUri = when (activeScreen) {
+            Screen.HOME -> lockArtworkUri ?: homeArtworkUri
+            Screen.LOCK -> homeArtworkUri
+        }
+        if (inactiveUri != currentArtworkUri) {
+            prefetchArtwork(ContentUriImageLoader(context.contentResolver, inactiveUri))
         }
     }
 

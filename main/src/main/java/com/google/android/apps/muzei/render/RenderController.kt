@@ -150,6 +150,14 @@ abstract class RenderController(
         callbacks.queueEventOnGlThread { renderer.holdEffectsForScreenSwitch() }
     }
 
+    /**
+     * Decode [imageLoader] ahead of time so a later switch to it (e.g. the inactive
+     * screen's artwork) is a texture upload rather than a fresh decode.
+     */
+    protected fun prefetchArtwork(imageLoader: ImageLoader) {
+        callbacks.queueEventOnGlThread { renderer.prefetch(imageLoader) }
+    }
+
     fun reloadCurrentArtwork(reloadType: ReloadType = ReloadWhenVisible) {
         if (destroyed) {
             // Don't reload artwork for destroyed RenderControllers

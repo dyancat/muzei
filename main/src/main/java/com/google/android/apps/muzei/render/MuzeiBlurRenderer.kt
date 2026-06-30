@@ -138,6 +138,13 @@ class MuzeiBlurRenderer(
     // the outgoing effects onto the outgoing picture set, snaps the live values to the new
     // targets, and clears this flag.
     private var effectHoldActive = false
+    // Single-slot cache of the inactive screen's decoded artwork (keyed by the ImageLoader's
+    // URI), so a lock<->home switch to a different provider is a texture upload instead of a
+    // fresh decode. Holds at most one decoded artwork. GL-thread only.
+    private var prefetchKey: String? = null
+    private var prefetchPendingKey: String? = null
+    private var prefetchedArtwork: DecodedArtwork? = null
+    private var prefetchGeneration = 0
 
     private var surfaceCreated: Boolean = false
 
@@ -392,6 +399,21 @@ class MuzeiBlurRenderer(
         }
 
         val generation = ++loadGeneration
+
+        // If this artwork was prefetched (e.g. switching back to the other screen),
+        // present the decoded result immediately instead of decoding it again. A ready
+        // prefetch is only ever for a different artwork than any still-running prefetch
+        // (prefetchKey is set on completion), so we leave that one running.
+        if (imageLoader.toString() == prefetchKey) {
+            val decoded = prefetchedArtwork
+            prefetchKey = null
+            prefetchedArtwork = null
+            if (decoded != null) {
+                present(decoded, immediate)
+                return
+            }
+        }
+
         if (immediate) {
             // Decode synchronously so the switch is instant (e.g. lock-screen transitions).
             loadInProgress = false
@@ -474,6 +496,44 @@ class MuzeiBlurRenderer(
             }
         }
         callbacks.requestRender()
+    }
+
+    /**
+     * Decode [imageLoader] ahead of time into the single-slot cache so a later
+     * [setAndConsumeImageLoader] for the same artwork (e.g. switching back to the other
+     * screen) presents it without a fresh decode. No-op if it's already cached/decoding.
+     * Must run on the GL thread; the decode itself runs off it.
+     */
+    fun prefetch(imageLoader: ImageLoader) {
+        val key = imageLoader.toString()
+        if (key == prefetchKey || key == prefetchPendingKey) {
+            // Already cached, or already being decoded for this artwork.
+            return
+        }
+        // Decode the new target. We deliberately keep any existing ready prefetch
+        // (prefetchKey/prefetchedArtwork) untouched until this decode completes, so a
+        // switch that consumes the ready one isn't raced by this request evicting it.
+        prefetchPendingKey = key
+        val generation = ++prefetchGeneration
+        decodeScope.launch {
+            val decoded = decode(imageLoader)
+            callbacks.queueEventOnGlThread {
+                if (generation != prefetchGeneration) {
+                    // Superseded by a newer prefetch request.
+                    decoded?.recycle()
+                    return@queueEventOnGlThread
+                }
+                prefetchPendingKey = null
+                if (decoded == null || !surfaceCreated) {
+                    decoded?.recycle()
+                    return@queueEventOnGlThread
+                }
+                // Swap in the freshly decoded prefetch, replacing any previous one.
+                prefetchedArtwork?.recycle()
+                prefetchedArtwork = decoded
+                prefetchKey = key
+            }
+        }
     }
 
     /**
@@ -760,6 +820,10 @@ class MuzeiBlurRenderer(
 
     fun destroy() {
         decodeScope.cancel()
+        prefetchedArtwork?.recycle()
+        prefetchedArtwork = null
+        prefetchKey = null
+        prefetchPendingKey = null
         currentGLPictureSet.destroyPictures()
         nextGLPictureSet.destroyPictures()
     }
