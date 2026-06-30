@@ -20,6 +20,9 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerState
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid
 import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
 import androidx.compose.foundation.lazy.staggeredgrid.items
@@ -81,8 +84,7 @@ import net.nurik.roman.muzei.R
 fun ChooseProvider(
     providers: List<ProviderInfo>,
     modifier: Modifier = Modifier,
-    selectedScreenTab: Int = 0,
-    onScreenTabSelected: (Int) -> Unit = {},
+    pagerState: PagerState = rememberPagerState(initialPage = 0, pageCount = { 2 }),
     lockLinked: Boolean = true,
     onToggleLockLink: () -> Unit = {},
     drawerSheetContent: @Composable ColumnScope.() -> Unit = {},
@@ -113,7 +115,7 @@ fun ChooseProvider(
                         actions = {
                             // On the lock screen tab, offer linking the lock screen
                             // back to the home screen's provider (no separate source).
-                            if (selectedScreenTab == 1) {
+                            if (pagerState.currentPage == 1) {
                                 IconButton(onClick = onToggleLockLink) {
                                     Icon(
                                         if (lockLinked) Icons.Default.Link
@@ -171,18 +173,23 @@ fun ChooseProvider(
                         scrollBehavior = scrollBehavior
                     )
                     SecondaryTabRow(
-                        selectedTabIndex = selectedScreenTab,
+                        selectedTabIndex = pagerState.currentPage,
                         containerColor = Color.Transparent,
                         contentColor = Color.White,
                     ) {
+                        val tabCoroutineScope = rememberCoroutineScope()
                         val tabs = listOf(
                             stringResource(R.string.settings_home_screen_title),
                             stringResource(R.string.settings_lock_screen_title),
                         )
                         tabs.forEachIndexed { index, tabTitle ->
                             Tab(
-                                selected = selectedScreenTab == index,
-                                onClick = { onScreenTabSelected(index) },
+                                selected = pagerState.currentPage == index,
+                                onClick = {
+                                    tabCoroutineScope.launch {
+                                        pagerState.animateScrollToPage(index)
+                                    }
+                                },
                                 text = { Text(text = tabTitle) },
                             )
                         }
@@ -192,41 +199,49 @@ fun ChooseProvider(
             containerColor = Color.Transparent,
             contentColor = Color.White,
         ) { innerPadding ->
-            val state = rememberLazyStaggeredGridState()
-            LaunchedEffect(autoScrollToProviderAuthority) {
-                val index = providers.indexOfFirst { it.authority == autoScrollToProviderAuthority }
-                if (autoScrollToProviderAuthority != null && index != -1) {
-                    state.animateScrollToItem(index)
-                    onAutoScrollToProviderCompleted()
+            // A page per screen (home/lock) so the user can swipe between the tabs.
+            // The provider list itself is the same on both pages; the selected
+            // checkmark and per-screen artwork update from the view model when the
+            // page settles (see ChooseProviderScreen).
+            HorizontalPager(state = pagerState) { _ ->
+                val state = rememberLazyStaggeredGridState()
+                LaunchedEffect(autoScrollToProviderAuthority) {
+                    val index = providers.indexOfFirst {
+                        it.authority == autoScrollToProviderAuthority
+                    }
+                    if (autoScrollToProviderAuthority != null && index != -1) {
+                        state.animateScrollToItem(index)
+                        onAutoScrollToProviderCompleted()
+                    }
                 }
-            }
-            LazyVerticalStaggeredGrid(
-                columns = StaggeredGridCells.Adaptive(minSize = 300.dp),
-                state = state,
-                contentPadding = innerPadding + PaddingValues(horizontal = 16.dp) +
-                        PaddingValues(bottom = 16.dp),
-                verticalItemSpacing = 16.dp,
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
-            ) {
-                items(
-                    items = providers,
-                    key = { it.authority },
-                ) { providerInfo ->
-                    ChooseProviderItem(
-                        providerInfo = providerInfo,
-                        onClick = {
-                            onClick(providerInfo)
-                        },
-                        onLongClick = {
-                            onLongClick(providerInfo)
-                        },
-                        onSettingsClick = {
-                            onSettingsClick(providerInfo)
-                        },
-                        onBrowseClick = {
-                            onBrowseClick(providerInfo)
-                        }
-                    )
+                LazyVerticalStaggeredGrid(
+                    columns = StaggeredGridCells.Adaptive(minSize = 300.dp),
+                    state = state,
+                    contentPadding = innerPadding + PaddingValues(horizontal = 16.dp) +
+                            PaddingValues(bottom = 16.dp),
+                    verticalItemSpacing = 16.dp,
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                ) {
+                    items(
+                        items = providers,
+                        key = { it.authority },
+                    ) { providerInfo ->
+                        ChooseProviderItem(
+                            providerInfo = providerInfo,
+                            onClick = {
+                                onClick(providerInfo)
+                            },
+                            onLongClick = {
+                                onLongClick(providerInfo)
+                            },
+                            onSettingsClick = {
+                                onSettingsClick(providerInfo)
+                            },
+                            onBrowseClick = {
+                                onBrowseClick(providerInfo)
+                            }
+                        )
+                    }
                 }
             }
         }

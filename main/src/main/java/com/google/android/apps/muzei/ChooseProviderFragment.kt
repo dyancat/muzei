@@ -35,6 +35,7 @@ import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -106,13 +107,14 @@ class ChooseProviderFragment : Fragment() {
             val viewModel: ChooseProviderViewModel = viewModel {
                 ChooseProviderViewModel(requireActivity().application)
             }
-            // Which screen (home/lock) the chooser is configuring. Published to
-            // ChooseProviderScreen so the ViewModel computes the checkmark for the
-            // active screen and a selection applies to it.
-            var selectedScreenTab by rememberSerializable { mutableStateOf(0) }
-            LifecycleStartEffect(selectedScreenTab) {
+            // Which screen (home/lock) the chooser is configuring, as a pager so the
+            // tabs can be swiped. Published to ChooseProviderScreen so the ViewModel
+            // computes the checkmark/artwork for the active screen and a selection
+            // applies to it.
+            val pagerState = rememberPagerState(initialPage = 0, pageCount = { 2 })
+            LifecycleStartEffect(pagerState.currentPage) {
                 ChooseProviderScreen.value =
-                    if (selectedScreenTab == 1) Screen.LOCK else Screen.HOME
+                    if (pagerState.currentPage == 1) Screen.LOCK else Screen.HOME
                 onStopOrDispose {
                     ChooseProviderScreen.value = Screen.HOME
                 }
@@ -194,8 +196,7 @@ class ChooseProviderFragment : Fragment() {
                 } else {
                     emptyList()
                 },
-                selectedScreenTab = selectedScreenTab,
-                onScreenTabSelected = { selectedScreenTab = it },
+                pagerState = pagerState,
                 lockLinked = lockLinked,
                 onToggleLockLink = {
                     val context = requireContext()
