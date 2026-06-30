@@ -103,6 +103,10 @@ fun ChooseProvider(
         modifier = modifier,
         drawerState = drawerState,
         drawerSheetContainerColor = drawerSheetContainerColor,
+        // The Home/Lock tabs are a horizontal pager; disable the drawer's swipe-to-open
+        // so it doesn't fight that gesture. The Auto Advance drawer still opens from the
+        // toolbar's Update button (and closes via the scrim or back).
+        gesturesEnabled = false,
     ) {
         val scrollBehavior =
             TopAppBarDefaults.enterAlwaysScrollBehavior(rememberTopAppBarState())
