@@ -258,6 +258,12 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
             setOffsetNotificationsEnabled(true)
             EffectsLockScreenOpen.collectIn(this) { isEffectsLockScreenOpen ->
                 renderController.onLockScreen = isEffectsLockScreenOpen
+                updateActiveScreen()
+            }
+            // While the app is in front, previewing the lock-screen tab of the
+            // provider chooser shows that screen's provider artwork.
+            ChooseProviderScreen.collectIn(this) {
+                updateActiveScreen()
             }
             ArtDetailOpen.collectIn(this) { isArtDetailOpened ->
                 cancelDelayedBlur()
@@ -399,12 +405,10 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
                 // here won't cause the launcher offset jump — flush any deferred colours update.
                 flushPendingColors()
             }
-            // Render the artwork for the screen the keyguard is actually showing. This
-            // is driven by the real lock state only — not EffectsLockScreenOpen, which is
-            // the in-app effects preview (the user is still on the home screen there). When
-            // the lock screen is linked to home this resolves to the same artwork and is a
-            // no-op; when unlinked it crossfades to the lock provider's artwork.
-            renderController.activeScreen = if (isLockScreenVisible) Screen.LOCK else Screen.HOME
+            // Render the artwork for the screen now in front (see updateActiveScreen).
+            // When the lock screen is linked to home this resolves to the same artwork
+            // and is a no-op; when unlinked it crossfades to the lock provider's artwork.
+            updateActiveScreen()
             // Crossfades that start while Muzei isn't the visible surface (e.g. unlocking to
             // an app rather than the home screen) used to stall and flicker on resume. That is
             // now handled by keeping the engine rendering in the background (onVisibilityChanged)
@@ -413,6 +417,20 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
             if (!EffectsLockScreenOpen.value) {
                 renderController.onLockScreen = isLockScreenVisible
             }
+        }
+
+        /**
+         * Choose which screen's artwork the wallpaper renders. The real lock screen
+         * always wins; otherwise, while the app is in front, the lock-screen tab of
+         * the effects or provider-chooser UI previews the lock provider's artwork.
+         * Everything else defaults to the home screen. When the lock screen is linked
+         * to home this resolves to the same artwork, so it's a no-op.
+         */
+        private fun updateActiveScreen() {
+            val showLock = lockScreenVisible ||
+                    EffectsLockScreenOpen.value ||
+                    ChooseProviderScreen.value == Screen.LOCK
+            renderController.activeScreen = if (showLock) Screen.LOCK else Screen.HOME
         }
 
         override fun onVisibilityChanged(visible: Boolean) {

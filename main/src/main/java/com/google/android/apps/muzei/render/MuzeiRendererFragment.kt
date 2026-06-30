@@ -37,6 +37,8 @@ import coil3.request.lifecycle
 import coil3.request.transformations
 import coil3.size.Size
 import coil3.transform.Transformation
+import com.google.android.apps.muzei.ChooseProviderScreen
+import com.google.android.apps.muzei.room.Screen
 import com.google.android.apps.muzei.settings.EffectsLockScreenOpen
 import com.google.android.apps.muzei.util.ImageBlurrer
 import com.google.android.apps.muzei.util.blur
@@ -193,9 +195,21 @@ class MuzeiRendererFragment : Fragment(), RenderController.Callbacks, MuzeiBlurR
             if (!demoMode) {
                 EffectsLockScreenOpen.collectIn(this@MuzeiRendererFragment) { isEffectsLockScreenOpen ->
                     renderController.onLockScreen = isEffectsLockScreenOpen
+                    updateActiveScreen()
+                }
+                // Previewing the lock-screen tab of the effects or provider-chooser UI
+                // shows that screen's provider artwork; otherwise default to home.
+                ChooseProviderScreen.collectIn(this@MuzeiRendererFragment) {
+                    updateActiveScreen()
                 }
             }
             renderController.visible = true
+        }
+
+        private fun updateActiveScreen() {
+            val showLock = EffectsLockScreenOpen.value ||
+                    ChooseProviderScreen.value == Screen.LOCK
+            renderController.activeScreen = if (showLock) Screen.LOCK else Screen.HOME
         }
 
         override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
