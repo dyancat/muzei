@@ -55,6 +55,9 @@ abstract class ProviderDao {
     abstract fun getAllProvidersFlow(): Flow<List<Provider>>
 
     @Query("SELECT * FROM provider")
+    abstract fun getAllProvidersLiveData(): LiveData<List<Provider>>
+
+    @Query("SELECT * FROM provider")
     abstract suspend fun getAllProviders(): List<Provider>
 
     @Transaction

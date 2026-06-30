@@ -193,10 +193,34 @@ class ProviderChangedWorker(
                 scheduleObserver(applicationContext, this)
             }
         }
-        // Now actually handle the provider change
+        // Now actually handle the provider change for every active provider
+        // (home and, when unlinked, lock), de-duplicated when both screens share one.
         val database = MuzeiDatabase.getInstance(applicationContext)
-        val provider = database.providerDao()
-                .getCurrentProvider() ?: return@withContext Result.failure()
+        val providers = database.providerDao().getAllProviders().distinctBy { it.authority }
+        if (providers.isEmpty()) {
+            return@withContext Result.failure()
+        }
+        var success = false
+        var retry = false
+        for (provider in providers) {
+            when (handleProviderChange(database, provider, tag)) {
+                is Result.Success -> success = true
+                is Result.Retry -> retry = true
+                else -> { /* failure: move on to the next provider */ }
+            }
+        }
+        when {
+            success -> Result.success()
+            retry -> Result.retry()
+            else -> Result.failure()
+        }
+    }
+
+    private suspend fun handleProviderChange(
+            database: MuzeiDatabase,
+            provider: Provider,
+            tag: String
+    ): Result {
         if (BuildConfig.DEBUG) {
             Log.d(TAG, "Provider Change ($tag) for ${provider.authority}")
         }
@@ -204,7 +228,7 @@ class ProviderChangedWorker(
         try {
             ContentProviderClientCompat.getClient(applicationContext, contentUri)?.use { client ->
                 val result = client.call(METHOD_GET_LOAD_INFO)
-                        ?: return@withContext Result.retry()
+                        ?: return Result.retry()
                 val lastLoadedTime = result.getLong(KEY_LAST_LOADED_TIME, 0L)
                 client.query(contentUri)?.use { allArtwork ->
                     val providerManager = ProviderManager.getInstance(applicationContext)
@@ -219,7 +243,7 @@ class ProviderChangedWorker(
                             if (BuildConfig.DEBUG) {
                                 Log.d(TAG, "Scheduling an immediate load")
                             }
-                            ArtworkLoadWorker.enqueueNext(applicationContext)
+                            ArtworkLoadWorker.enqueueNext(applicationContext, provider.authority)
                             enqueued = true
                         }
                     } else if (loadFrequencySeconds > 0) {
@@ -255,7 +279,7 @@ class ProviderChangedWorker(
                         // and haven't just called enqueueNext / enqueuePeriodic
                         client.call(ProtocolConstants.METHOD_REQUEST_LOAD)
                     }
-                    return@withContext Result.success()
+                    return Result.success()
                 }
             }
         } catch (e: Exception) {
@@ -264,7 +288,7 @@ class ProviderChangedWorker(
                 else -> Log.i(TAG, "Provider ${provider.authority} crashed while retrieving artwork: ${e.message}")
             }
         }
-        Result.retry()
+        return Result.retry()
     }
 
     private suspend fun isCurrentArtworkValid(
