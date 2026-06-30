@@ -17,9 +17,11 @@
 package com.google.android.apps.muzei.render
 
 import android.content.Context
+import android.net.Uri
 import androidx.lifecycle.LifecycleOwner
 import com.google.android.apps.muzei.api.MuzeiContract
 import com.google.android.apps.muzei.room.MuzeiDatabase
+import com.google.android.apps.muzei.room.Screen
 import com.google.android.apps.muzei.room.contentUri
 import com.google.android.apps.muzei.util.collectIn
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -35,6 +37,12 @@ class RealRenderController(
      * If there's no artwork yet (as is the case when in Direct Boot), then we
      * use [MuzeiContract.Artwork.CONTENT_URI].
      */
+    private var homeArtworkUri: Uri = MuzeiContract.Artwork.CONTENT_URI
+    /**
+     * The lock screen's current artwork, or null when the lock screen is "linked"
+     * to home (it has no provider of its own) so we fall back to [homeArtworkUri].
+     */
+    private var lockArtworkUri: Uri? = null
     private var currentArtworkUri = MuzeiContract.Artwork.CONTENT_URI
 
     override fun onCreate(owner: LifecycleOwner) {
@@ -45,14 +53,48 @@ class RealRenderController(
     override fun onStart(owner: LifecycleOwner) {
         super.onStart(owner)
         val database = MuzeiDatabase.getInstance(context)
-        database.artworkDao().getCurrentArtworkFlow().filterNotNull()
+        database.artworkDao().getCurrentArtworkFlow(Screen.HOME.value).filterNotNull()
                 // Provider row updates (e.g. supportsNextArtwork being refreshed by
                 // ProviderChangedWorker right after a provider switch) re-emit the same
                 // artwork. Without this, switching providers decodes the image twice and
                 // restarts the crossfade mid-animation, which reads as lag.
                 .distinctUntilChanged()
                 .collectIn(owner) { artwork ->
-            currentArtworkUri = artwork.contentUri
+            homeArtworkUri = artwork.contentUri
+            if (activeScreen == Screen.HOME) {
+                updateCurrentArtwork()
+            }
+        }
+        // The lock flow is intentionally not filtered for null: a null means the
+        // lock screen is linked to home (no lock provider row), and we must react
+        // to that transition to fall back to the home artwork.
+        database.artworkDao().getCurrentArtworkFlow(Screen.LOCK.value)
+                .distinctUntilChanged()
+                .collectIn(owner) { artwork ->
+            lockArtworkUri = artwork?.contentUri
+            if (activeScreen == Screen.LOCK) {
+                updateCurrentArtwork()
+            }
+        }
+    }
+
+    override fun onActiveScreenChanged(screen: Screen) {
+        updateCurrentArtwork()
+    }
+
+    /**
+     * Point [currentArtworkUri] at the active screen's artwork (lock falls back to
+     * home when linked) and crossfade to it only if it actually changed. When the
+     * lock screen is linked this resolves to the home artwork, so a lock<->home
+     * transition is a no-op and stays performance-neutral.
+     */
+    private fun updateCurrentArtwork() {
+        val targetUri = when (activeScreen) {
+            Screen.HOME -> homeArtworkUri
+            Screen.LOCK -> lockArtworkUri ?: homeArtworkUri
+        }
+        if (targetUri != currentArtworkUri) {
+            currentArtworkUri = targetUri
             reloadCurrentArtwork()
         }
     }

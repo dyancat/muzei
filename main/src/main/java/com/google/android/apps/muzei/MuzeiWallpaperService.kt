@@ -51,6 +51,7 @@ import com.google.android.apps.muzei.render.RealRenderController
 import com.google.android.apps.muzei.render.RenderController
 import com.google.android.apps.muzei.room.Artwork
 import com.google.android.apps.muzei.room.MuzeiDatabase
+import com.google.android.apps.muzei.room.Screen
 import com.google.android.apps.muzei.room.contentUri
 import com.google.android.apps.muzei.room.openArtworkInfo
 import com.google.android.apps.muzei.settings.EffectsLockScreenOpen
@@ -398,6 +399,12 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
                 // here won't cause the launcher offset jump — flush any deferred colours update.
                 flushPendingColors()
             }
+            // Render the artwork for the screen the keyguard is actually showing. This
+            // is driven by the real lock state only — not EffectsLockScreenOpen, which is
+            // the in-app effects preview (the user is still on the home screen there). When
+            // the lock screen is linked to home this resolves to the same artwork and is a
+            // no-op; when unlinked it crossfades to the lock provider's artwork.
+            renderController.activeScreen = if (isLockScreenVisible) Screen.LOCK else Screen.HOME
             // Crossfades that start while Muzei isn't the visible surface (e.g. unlocking to
             // an app rather than the home screen) used to stall and flicker on resume. That is
             // now handled by keeping the engine rendering in the background (onVisibilityChanged)
@@ -489,7 +496,8 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
                             Firebase.analytics.logEvent("next_artwork") {
                                 param(FirebaseAnalytics.Param.CONTENT_TYPE, type)
                             }
-                            ProviderManager.getInstance(this@MuzeiWallpaperService).nextArtwork()
+                            ProviderManager.getInstance(this@MuzeiWallpaperService)
+                                    .nextArtwork(renderController.activeScreen)
                         }
                     }
                 }
@@ -499,7 +507,7 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
                             val artwork = MuzeiDatabase
                                 .getInstance(this@MuzeiWallpaperService)
                                 .artworkDao()
-                                .getCurrentArtwork()
+                                .getCurrentArtwork(renderController.activeScreen.value)
                             artwork?.run {
                                 Firebase.analytics.logEvent("artwork_info_open") {
                                     param(FirebaseAnalytics.Param.CONTENT_TYPE, type)
