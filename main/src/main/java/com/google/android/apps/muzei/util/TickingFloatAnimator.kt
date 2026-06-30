@@ -50,13 +50,6 @@ class TickingFloatAnimator(private val duration: Int) {
         tick()
     }
 
-    fun finish() {
-        if (isRunning) {
-            isRunning = false
-            currentValue = endValue.toFloat().also { onEnd() }
-        }
-    }
-
     /**
      * Advances the animation to the current time.
      *

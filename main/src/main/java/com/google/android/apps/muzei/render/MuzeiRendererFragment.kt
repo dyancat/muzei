@@ -142,11 +142,6 @@ class MuzeiRendererFragment : Fragment(), RenderController.Callbacks, MuzeiBlurR
         }
     }
 
-    override fun onHiddenChanged(hidden: Boolean) {
-        super.onHiddenChanged(hidden)
-        muzeiView?.renderController?.visible = !hidden
-    }
-
     override fun onDestroyView() {
         super.onDestroyView()
         muzeiView = null
@@ -195,7 +190,6 @@ class MuzeiRendererFragment : Fragment(), RenderController.Callbacks, MuzeiBlurR
                     renderController.onLockScreen = isEffectsLockScreenOpen
                 }
             }
-            renderController.visible = true
         }
 
         override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {

@@ -287,7 +287,12 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
         }
 
         override fun onVisibilityChanged(visible: Boolean) {
-            renderController.visible = visible
+            // Intentionally a no-op that does NOT call super: the base GLEngine pauses the GL
+            // thread when the wallpaper goes invisible. We deliberately keep rendering in the
+            // background so an in-flight crossfade/blur animation finishes instead of stalling and
+            // flickering when Muzei next resumes (e.g. unlocking to an app rather than the home
+            // screen). RENDERMODE_WHEN_DIRTY means this only costs frames while an animation is
+            // actually running — an idle background wallpaper still doesn't render.
         }
 
         override fun onOffsetsChanged(
@@ -404,12 +409,6 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
                 queueEvent {
                     renderer.setIsBlurred(isBlurred = true, artDetailMode = false)
                 }
-            }
-        }
-
-        override fun requestRender() {
-            if (renderController.visible) {
-                super.requestRender()
             }
         }
 

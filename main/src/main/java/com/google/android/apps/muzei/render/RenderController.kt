@@ -18,8 +18,6 @@ package com.google.android.apps.muzei.render
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.os.Handler
-import android.os.Looper
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.lifecycleScope
@@ -28,31 +26,12 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
-sealed class ReloadType
-data object ReloadWhenVisible : ReloadType()
-data object ReloadDespiteInvisible : ReloadType()
-data object ReloadImmediate : ReloadType()
-
 abstract class RenderController(
         protected var context: Context,
         protected var renderer: MuzeiBlurRenderer,
         private var callbacks: Callbacks
 ) : DefaultLifecycleObserver {
 
-    var visible: Boolean = false
-        set(value) {
-            field = value
-            if (value) {
-                callbacks.queueEventOnGlThread {
-                    val loader = queuedImageLoader
-                    if (loader != null) {
-                        queuedImageLoader = null
-                        renderer.setAndConsumeImageLoader(loader)
-                    }
-                }
-                callbacks.requestRender()
-            }
-        }
     var onLockScreen: Boolean = false
         set(value) {
             if (field != value) {
@@ -63,51 +42,46 @@ abstract class RenderController(
                         if (value) Prefs.PREF_LOCK_DIM_AMOUNT else Prefs.PREF_DIM_AMOUNT)
                 renderer.recomputeGreyAmount(
                         if (value) Prefs.PREF_LOCK_GREY_AMOUNT else Prefs.PREF_GREY_AMOUNT)
-                // Switch immediately if we're transitioning to the lock screen
-                reloadCurrentArtwork(if (value) ReloadImmediate else ReloadDespiteInvisible)
+                // The GPU blur reads the blur/dim/grey amounts live and onDrawFrame eases the
+                // effective values toward the new targets, so the home<->lock transition animates
+                // without re-decoding the artwork. Just kick a render to start the easing; it keeps
+                // running in the background (see MuzeiWallpaperEngine.onVisibilityChanged).
+                callbacks.requestRender()
             }
         }
     private lateinit var coroutineScope: CoroutineScope
     private var destroyed = false
-    private var queuedImageLoader: ImageLoader? = null
     private val sharedPreferenceChangeListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (onLockScreen) {
             when (key) {
                 Prefs.PREF_LOCK_BLUR_AMOUNT -> {
                     renderer.recomputeMaxPrescaledBlurPixels()
-                    throttledForceReloadCurrentArtwork()
+                    callbacks.requestRender()
                 }
                 Prefs.PREF_LOCK_DIM_AMOUNT -> {
                     renderer.recomputeMaxDimAmount()
-                    throttledForceReloadCurrentArtwork()
+                    callbacks.requestRender()
                 }
                 Prefs.PREF_LOCK_GREY_AMOUNT -> {
                     renderer.recomputeGreyAmount()
-                    throttledForceReloadCurrentArtwork()
+                    callbacks.requestRender()
                 }
             }
         } else {
             when (key) {
                 Prefs.PREF_BLUR_AMOUNT -> {
                     renderer.recomputeMaxPrescaledBlurPixels()
-                    throttledForceReloadCurrentArtwork()
+                    callbacks.requestRender()
                 }
                 Prefs.PREF_DIM_AMOUNT -> {
                     renderer.recomputeMaxDimAmount()
-                    throttledForceReloadCurrentArtwork()
+                    callbacks.requestRender()
                 }
                 Prefs.PREF_GREY_AMOUNT -> {
                     renderer.recomputeGreyAmount()
-                    throttledForceReloadCurrentArtwork()
+                    callbacks.requestRender()
                 }
             }
-        }
-    }
-
-    private val throttledForceReloadHandler by lazy {
-        Handler(Looper.getMainLooper()) {
-            reloadCurrentArtwork()
-            true
         }
     }
 
@@ -118,34 +92,23 @@ abstract class RenderController(
     }
 
     override fun onDestroy(owner: LifecycleOwner) {
-        queuedImageLoader = null
         Prefs.getSharedPreferences(context)
                 .unregisterOnSharedPreferenceChangeListener(sharedPreferenceChangeListener)
         destroyed = true
     }
 
-    private fun throttledForceReloadCurrentArtwork() {
-        throttledForceReloadHandler.removeMessages(0)
-        throttledForceReloadHandler.sendEmptyMessageDelayed(0, 250)
-    }
-
     protected abstract suspend fun openDownloadedCurrentArtwork(): ImageLoader
 
-    fun reloadCurrentArtwork(reloadType: ReloadType = ReloadWhenVisible) {
+    fun reloadCurrentArtwork() {
         if (destroyed) {
             // Don't reload artwork for destroyed RenderControllers
             return
         }
         coroutineScope.launch(Dispatchers.Main) {
             val imageLoader = openDownloadedCurrentArtwork()
-
             callbacks.queueEventOnGlThread {
-                if (visible || reloadType != ReloadWhenVisible) {
-                    renderer.setAndConsumeImageLoader(imageLoader,
-                    reloadType == ReloadImmediate || !visible)
-                } else {
-                    queuedImageLoader = imageLoader
-                }
+                // The renderer buffers this itself if its surface isn't ready yet.
+                renderer.setAndConsumeImageLoader(imageLoader)
             }
         }
     }

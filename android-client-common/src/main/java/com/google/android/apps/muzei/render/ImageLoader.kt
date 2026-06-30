@@ -53,6 +53,7 @@ sealed class ImageLoader {
 
     companion object {
         private const val TAG = "ImageLoader"
+        private const val UNKNOWN_ROTATION = -1
 
         suspend fun decode(
                 contentResolver: ContentResolver,
@@ -65,15 +66,29 @@ sealed class ImageLoader {
         }
     }
 
+    // Rotation and original (pre-rotation) bounds are immutable for a given source, so compute
+    // each once and reuse it across the several getSize()/decode() calls made per artwork load
+    // rather than re-opening the stream (an IPC + file read for content URIs) every time.
+    private var cachedRotation: Int = UNKNOWN_ROTATION
+    private var cachedOriginalBounds: Pair<Int, Int>? = null
+
+    /** Original (pre-rotation) pixel dimensions, decoded once and cached. (0, 0) on failure. */
+    private fun originalBounds(): Pair<Int, Int> {
+        cachedOriginalBounds?.let { return it }
+        val bounds = openInputStream()?.use { input ->
+            val options = BitmapFactory.Options().apply {
+                inJustDecodeBounds = true
+            }
+            BitmapFactory.decodeStream(input, null, options)
+            options.outWidth to options.outHeight
+        } ?: (0 to 0)
+        return bounds.also { cachedOriginalBounds = it }
+    }
+
     fun getSize(): Pair<Int, Int> {
         return try {
-            val (originalWidth, originalHeight) = openInputStream()?.use { input ->
-                val options = BitmapFactory.Options().apply {
-                    inJustDecodeBounds = true
-                }
-                BitmapFactory.decodeStream(input, null, options)
-                options.outWidth to options.outHeight
-            } ?: return 0 to 0
+            val (originalWidth, originalHeight) = originalBounds()
+            if (originalWidth == 0 || originalHeight == 0) return 0 to 0
             val rotation = getRotation()
             val width = if (rotation == 90 || rotation == 270) originalHeight else originalWidth
             val height = if (rotation == 90 || rotation == 270) originalWidth else originalHeight
@@ -91,13 +106,8 @@ sealed class ImageLoader {
             targetHeight: Int = targetWidth
     ) : Bitmap? {
         return try {
-            val (originalWidth, originalHeight) = openInputStream()?.use { input ->
-                val options = BitmapFactory.Options().apply {
-                    inJustDecodeBounds = true
-                }
-                BitmapFactory.decodeStream(input, null, options)
-                Pair(options.outWidth, options.outHeight)
-            } ?: return null
+            val (originalWidth, originalHeight) = originalBounds()
+            if (originalWidth == 0 || originalHeight == 0) return null
             val rotation = getRotation()
             val width = if (rotation == 90 || rotation == 270) originalHeight else originalWidth
             val height = if (rotation == 90 || rotation == 270) originalWidth else originalHeight
@@ -115,14 +125,33 @@ sealed class ImageLoader {
                 when (rotation) {
                     0 -> this
                     else -> {
-                        val rotateMatrix = Matrix().apply {
+                        // Post-rotation displayed dimensions of the decoded bitmap.
+                        val rotated90 = rotation == 90 || rotation == 270
+                        val displayWidth = if (rotated90) this.height else this.width
+                        val displayHeight = if (rotated90) this.width else this.height
+                        // inSampleSize is power-of-two coarse, so the decode lands at or above the
+                        // target. Fold a downscale-to-target into the rotation matrix so we produce
+                        // a target-sized rotated bitmap in a single pass instead of allocating and
+                        // rotating the full-resolution one. It's a downscale (never an upscale), so
+                        // there's no quality loss, and the rotation cost drops from being
+                        // proportional to the full image to being proportional to the (small) output.
+                        val scale = if (targetWidth != 0 && targetHeight != 0) {
+                            max(targetWidth.toFloat() / displayWidth,
+                                    targetHeight.toFloat() / displayHeight).coerceAtMost(1f)
+                        } else {
+                            1f
+                        }
+                        val matrix = Matrix().apply {
+                            if (scale < 1f) {
+                                postScale(scale, scale)
+                            }
                             postRotate(rotation.toFloat())
                         }
                         Bitmap.createBitmap(
                                 this, 0, 0,
                                 this.width, this.height,
-                                rotateMatrix, true).also { rotatedBitmap ->
-                            if (rotatedBitmap != this) {
+                                matrix, true).also { transformed ->
+                            if (transformed != this) {
                                 recycle()
                             }
                         }
@@ -137,7 +166,12 @@ sealed class ImageLoader {
         }
     }
 
-    fun getRotation(): Int = try {
+    fun getRotation(): Int {
+        cachedRotation.let { if (it != UNKNOWN_ROTATION) return it }
+        return computeRotation().also { cachedRotation = it }
+    }
+
+    private fun computeRotation(): Int = try {
         openInputStream()?.use { input ->
             val exifInterface = ExifInterface(input)
             when (exifInterface.getAttributeInt(ExifInterface.TAG_ORIENTATION,
