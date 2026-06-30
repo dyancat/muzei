@@ -31,6 +31,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.google.android.apps.muzei.room.Artwork
 import com.google.android.apps.muzei.room.MuzeiDatabase
+import com.google.android.apps.muzei.room.Screen
 import com.google.android.apps.muzei.room.getInstalledProviders
 import com.google.android.apps.muzei.sync.ProviderManager
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -103,12 +104,52 @@ class ChooseProviderViewModel(application: Application) : AndroidViewModel(appli
     }
 
     /**
-     * The authority of the current MuzeiArtProvider
+     * The authority of the home screen's MuzeiArtProvider
      */
     private val currentProviderAuthority = database.providerDao().getCurrentProviderFlow()
       .map { provider ->
         provider?.authority
     }
+
+    /**
+     * The authority of the lock screen's MuzeiArtProvider, or null when the lock
+     * screen is "linked" to home (it has no provider of its own).
+     */
+    private val lockProviderAuthority = database.providerDao()
+      .getProviderFlow(Screen.LOCK.value)
+      .map { provider ->
+        provider?.authority
+    }
+
+    /**
+     * The authority selected for the screen the chooser is currently configuring.
+     * The lock screen falls back to the home provider when it is linked.
+     */
+    private val activeScreenAuthority = combine(
+            ChooseProviderScreen,
+            currentProviderAuthority,
+            lockProviderAuthority
+    ) { screen, home, lock ->
+        when (screen) {
+            Screen.HOME -> home
+            Screen.LOCK -> lock ?: home
+        }
+    }
+
+    /**
+     * Whether the lock screen is linked to home (has no provider of its own),
+     * used to drive the "use the same source on the lock screen" toggle.
+     */
+    val lockLinked = lockProviderAuthority
+            .map { it == null }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), true)
+
+    /**
+     * The home screen's selected authority, used to seed the lock screen when the
+     * user unlinks it.
+     */
+    val homeProviderAuthority = currentProviderAuthority
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), null)
 
     /**
      * An authority to current artwork URI map
@@ -143,7 +184,7 @@ class ChooseProviderViewModel(application: Application) : AndroidViewModel(appli
      */
     val providers = combine(
             installedProviders,
-            currentProviderAuthority,
+            activeScreenAuthority,
             currentArtworkByProvider,
             descriptionInvalidationNanoTime
     ) { installedProviders, providerAuthority, artworkForProvider, _ ->

@@ -47,6 +47,7 @@ import androidx.compose.ui.platform.LocalResources
 import androidx.core.net.toUri
 import androidx.fragment.app.Fragment
 import androidx.fragment.compose.content
+import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.fragment.findNavController
@@ -54,6 +55,7 @@ import androidx.navigation.fragment.navArgs
 import com.google.android.apps.muzei.api.provider.MuzeiArtProvider
 import com.google.android.apps.muzei.api.provider.ProviderContract
 import com.google.android.apps.muzei.notifications.NotificationSettingsDialogFragment
+import com.google.android.apps.muzei.room.Screen
 import com.google.android.apps.muzei.sync.ProviderManager
 import com.google.android.apps.muzei.theme.AppTheme
 import com.google.android.apps.muzei.util.toast
@@ -62,9 +64,18 @@ import com.google.firebase.analytics.FirebaseAnalytics
 import com.google.firebase.analytics.analytics
 import com.google.firebase.analytics.logEvent
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import net.nurik.roman.muzei.R
+
+/**
+ * Which screen the provider chooser is currently configuring. Mirrors
+ * [com.google.android.apps.muzei.settings.EffectsLockScreenOpen] for the
+ * effects UI: it drives which screen's provider a selection applies to and
+ * which screen's selection shows the checkmark.
+ */
+val ChooseProviderScreen = MutableStateFlow(Screen.HOME)
 
 private class StartActivityFromSettings : ActivityResultContract<ComponentName, Boolean>() {
     override fun createIntent(context: Context, input: ComponentName): Intent =
@@ -95,6 +106,19 @@ class ChooseProviderFragment : Fragment() {
             val viewModel: ChooseProviderViewModel = viewModel {
                 ChooseProviderViewModel(requireActivity().application)
             }
+            // Which screen (home/lock) the chooser is configuring. Published to
+            // ChooseProviderScreen so the ViewModel computes the checkmark for the
+            // active screen and a selection applies to it.
+            var selectedScreenTab by rememberSerializable { mutableStateOf(0) }
+            LifecycleStartEffect(selectedScreenTab) {
+                ChooseProviderScreen.value =
+                    if (selectedScreenTab == 1) Screen.LOCK else Screen.HOME
+                onStopOrDispose {
+                    ChooseProviderScreen.value = Screen.HOME
+                }
+            }
+            val lockLinked by viewModel.lockLinked.collectAsState()
+            val homeProviderAuthority by viewModel.homeProviderAuthority.collectAsState()
             var startActivityProviderAuthority by rememberSerializable { mutableStateOf("") }
             val providerSetupLauncher = rememberLauncherForActivityResult(
                 StartActivityFromSettings()
@@ -109,7 +133,7 @@ class ChooseProviderFragment : Fragment() {
                                 param(FirebaseAnalytics.Param.ITEM_LIST_NAME, "providers")
                                 param(FirebaseAnalytics.Param.CONTENT_TYPE, "after_setup")
                             }
-                            ProviderManager.select(context, provider)
+                            ProviderManager.select(context, provider, ChooseProviderScreen.value)
                         }
                     }
                 }
@@ -169,6 +193,28 @@ class ChooseProviderFragment : Fragment() {
                     listOf(playStoreProviderInfo)
                 } else {
                     emptyList()
+                },
+                selectedScreenTab = selectedScreenTab,
+                onScreenTabSelected = { selectedScreenTab = it },
+                lockLinked = lockLinked,
+                onToggleLockLink = {
+                    val context = requireContext()
+                    val home = homeProviderAuthority
+                    val currentlyLinked = lockLinked
+                    lifecycleScope.launch {
+                        withContext(NonCancellable) {
+                            if (currentlyLinked) {
+                                // Unlink: seed the lock screen from the home provider so the
+                                // user has a starting point they can then change.
+                                if (home != null) {
+                                    ProviderManager.select(context, home, Screen.LOCK)
+                                }
+                            } else {
+                                // Re-link the lock screen to the home provider.
+                                ProviderManager.clearLock(context)
+                            }
+                        }
+                    }
                 },
                 drawerSheetContent = {
                     AutoAdvance(
@@ -236,7 +282,8 @@ class ChooseProviderFragment : Fragment() {
                             }
                             lifecycleScope.launch {
                                 withContext(NonCancellable) {
-                                    ProviderManager.select(context, providerInfo.authority)
+                                    ProviderManager.select(context, providerInfo.authority,
+                                        ChooseProviderScreen.value)
                                 }
                             }
                         }

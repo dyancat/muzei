@@ -17,6 +17,7 @@
 package com.google.android.apps.muzei
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid
@@ -24,6 +25,8 @@ import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
 import androidx.compose.foundation.lazy.staggeredgrid.items
 import androidx.compose.foundation.lazy.staggeredgrid.rememberLazyStaggeredGridState
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Update
 import androidx.compose.material3.DrawerDefaults
@@ -34,6 +37,8 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SecondaryTabRow
+import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -76,6 +81,10 @@ import net.nurik.roman.muzei.R
 fun ChooseProvider(
     providers: List<ProviderInfo>,
     modifier: Modifier = Modifier,
+    selectedScreenTab: Int = 0,
+    onScreenTabSelected: (Int) -> Unit = {},
+    lockLinked: Boolean = true,
+    onToggleLockLink: () -> Unit = {},
     drawerSheetContent: @Composable ColumnScope.() -> Unit = {},
     drawerSheetContainerColor: Color = DrawerDefaults.modalContainerColor,
     onNotificationSettingsClick: () -> Unit = {},
@@ -98,54 +107,87 @@ fun ChooseProvider(
         Scaffold(
             modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
             topBar = {
-                TopAppBar(
-                    title = {},
-                    actions = {
-                        val coroutineScope = rememberCoroutineScope()
-                        IconButton(
-                            onClick = {
-                                coroutineScope.launch {
-                                    Firebase.analytics.logEvent("auto_advance_open", null)
-                                    drawerState.open()
+                Column {
+                    TopAppBar(
+                        title = {},
+                        actions = {
+                            // On the lock screen tab, offer linking the lock screen
+                            // back to the home screen's provider (no separate source).
+                            if (selectedScreenTab == 1) {
+                                IconButton(onClick = onToggleLockLink) {
+                                    Icon(
+                                        if (lockLinked) Icons.Default.Link
+                                        else Icons.Default.LinkOff,
+                                        contentDescription = stringResource(
+                                            if (lockLinked) R.string.action_link_lock_source
+                                            else R.string.action_link_lock_source_off
+                                        ),
+                                    )
                                 }
-                            },
-                        ) {
-                            Icon(
-                                Icons.Default.Update,
-                                contentDescription = stringResource(R.string.auto_advance_settings),
-                            )
-                        }
-                        // Show the menu items in a DropdownMenu
-                        var expanded by remember { mutableStateOf(false) }
-                        IconButton(onClick = { expanded = !expanded }) {
-                            Icon(
-                                Icons.Default.MoreVert,
-                                contentDescription = null
-                            )
-                        }
-                        DropdownMenu(
-                            expanded = expanded,
-                            onDismissRequest = { expanded = false }
-                        ) {
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.notification_settings)) },
+                            }
+                            val coroutineScope = rememberCoroutineScope()
+                            IconButton(
                                 onClick = {
-                                    expanded = false
-                                    onNotificationSettingsClick()
-                                }
+                                    coroutineScope.launch {
+                                        Firebase.analytics.logEvent("auto_advance_open", null)
+                                        drawerState.open()
+                                    }
+                                },
+                            ) {
+                                Icon(
+                                    Icons.Default.Update,
+                                    contentDescription = stringResource(R.string.auto_advance_settings),
+                                )
+                            }
+                            // Show the menu items in a DropdownMenu
+                            var expanded by remember { mutableStateOf(false) }
+                            IconButton(onClick = { expanded = !expanded }) {
+                                Icon(
+                                    Icons.Default.MoreVert,
+                                    contentDescription = null
+                                )
+                            }
+                            DropdownMenu(
+                                expanded = expanded,
+                                onDismissRequest = { expanded = false }
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.notification_settings)) },
+                                    onClick = {
+                                        expanded = false
+                                        onNotificationSettingsClick()
+                                    }
+                                )
+                            }
+                        },
+                        colors = TopAppBarDefaults.topAppBarColors(
+                            containerColor = Color.Transparent,
+                            scrolledContainerColor = Color.Transparent,
+                            navigationIconContentColor = Color.White,
+                            titleContentColor = Color.White,
+                            actionIconContentColor = Color.White,
+                            subtitleContentColor = Color.White,
+                        ),
+                        scrollBehavior = scrollBehavior
+                    )
+                    SecondaryTabRow(
+                        selectedTabIndex = selectedScreenTab,
+                        containerColor = Color.Transparent,
+                        contentColor = Color.White,
+                    ) {
+                        val tabs = listOf(
+                            stringResource(R.string.settings_home_screen_title),
+                            stringResource(R.string.settings_lock_screen_title),
+                        )
+                        tabs.forEachIndexed { index, tabTitle ->
+                            Tab(
+                                selected = selectedScreenTab == index,
+                                onClick = { onScreenTabSelected(index) },
+                                text = { Text(text = tabTitle) },
                             )
                         }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = Color.Transparent,
-                        scrolledContainerColor = Color.Transparent,
-                        navigationIconContentColor = Color.White,
-                        titleContentColor = Color.White,
-                        actionIconContentColor = Color.White,
-                        subtitleContentColor = Color.White,
-                    ),
-                    scrollBehavior = scrollBehavior
-                )
+                    }
+                }
             },
             containerColor = Color.Transparent,
             contentColor = Color.White,
