@@ -70,6 +70,10 @@
                 android:name="contentUri"
                 app:argType="android.net.Uri"/>
             <argument
+                android:name="screen"
+                app:argType="integer"
+                android:defaultValue="0" />
+            <argument
                 android:name="useDarkStatusBar"
                 android:defaultValue="true" />
         </fragment>

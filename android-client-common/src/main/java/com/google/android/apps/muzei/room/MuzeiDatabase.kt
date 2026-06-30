@@ -40,7 +40,7 @@ import java.io.File
     autoMigrations = [
         AutoMigration(from = 4, to = 5)
     ],
-    version = 10
+    version = 11
 )
 abstract class MuzeiDatabase : RoomDatabase() {
 
@@ -65,7 +65,8 @@ abstract class MuzeiDatabase : RoomDatabase() {
                                 Migration6to8(applicationContext),
                                 Migration7to8(applicationContext),
                                 MIGRATION_8_9,
-                                MIGRATION_9_10)
+                                MIGRATION_9_10,
+                                MIGRATION_10_11)
                         .build().also { database ->
                             database.invalidationTracker.addObserver(
                                     object : InvalidationTracker.Observer("artwork") {
@@ -389,6 +390,16 @@ abstract class MuzeiDatabase : RoomDatabase() {
                         + "SELECT 0, authority, supportsNextArtwork FROM provider")
                 db.execSQL("DROP TABLE provider")
                 db.execSQL("ALTER TABLE provider2 RENAME TO provider")
+            }
+        }
+
+        private val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Tag each displayed artwork with the screen it belongs to so the
+                // home and lock screens keep independent timelines (and can show a
+                // different image even from the same provider). Existing artwork
+                // becomes the home screen's (screen = 0).
+                db.execSQL("ALTER TABLE artwork ADD COLUMN screen INTEGER NOT NULL DEFAULT 0")
             }
         }
     }

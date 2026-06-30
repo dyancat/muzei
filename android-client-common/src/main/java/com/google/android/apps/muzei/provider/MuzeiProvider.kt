@@ -32,6 +32,7 @@ import androidx.core.os.UserManagerCompat
 import androidx.sqlite.db.SupportSQLiteQueryBuilder
 import com.google.android.apps.muzei.api.MuzeiContract
 import com.google.android.apps.muzei.room.MuzeiDatabase
+import com.google.android.apps.muzei.room.Screen
 import com.google.android.apps.muzei.sync.ProviderManager
 import kotlinx.coroutines.runBlocking
 import net.nurik.roman.muzei.androidclientcommon.BuildConfig
@@ -175,8 +176,11 @@ class MuzeiProvider : ContentProvider() {
                     .getCurrentProviderBlocking()
         }
         var finalSelection = provider?.run {
+            // The public contract reflects the home screen, so restrict to the home
+            // provider's home-screen artwork (screen = 0).
             DatabaseUtils.concatenateWhere(selection,
-                    "providerAuthority = \"${provider.authority}\"")
+                    "providerAuthority = \"${provider.authority}\" " +
+                            "AND screen = ${Screen.HOME.value}")
         } ?: selection
         if (uriMatcher.match(uri) == ARTWORK_ID) {
             // If the incoming URI is for a single artwork identified by its ID, appends "_ID = <artworkId>"

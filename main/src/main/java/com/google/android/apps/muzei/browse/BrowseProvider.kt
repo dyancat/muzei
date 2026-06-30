@@ -90,6 +90,7 @@ private const val REFRESH_DELAY = 300L // milliseconds
 @Composable
 fun BrowseProvider(
     contentUri: android.net.Uri,
+    screen: Int = 0,
     onUp: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -132,7 +133,7 @@ fun BrowseProvider(
             }
         },
         onArtworkClick = { artwork ->
-            onArtworkClicked(artwork, context, client)
+            onArtworkClicked(artwork, screen, context, client)
         },
         onActionClick = { artwork, action ->
             onActionClicked(artwork, context, action)
@@ -142,6 +143,7 @@ fun BrowseProvider(
 
 private suspend fun onArtworkClicked(
     artwork: Artwork,
+    screen: Int,
     context: Context,
     client: ContentProviderClientCompat?
 ) {
@@ -151,8 +153,10 @@ private suspend fun onArtworkClicked(
         param(FirebaseAnalytics.Param.ITEM_LIST_NAME, "actions")
         param(FirebaseAnalytics.Param.CONTENT_TYPE, "browse")
     }
-    // Ensure the date added is set to the current time
+    // Ensure the date added is set to the current time, and tag the artwork with
+    // the screen being configured so it becomes that screen's current artwork.
     artwork.dateAdded.time = System.currentTimeMillis()
+    artwork.screen = screen
     MuzeiDatabase.getInstance(context).artworkDao()
         .insert(artwork)
     client?.call(METHOD_MARK_ARTWORK_LOADED, artwork.imageUri.toString())

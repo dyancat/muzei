@@ -56,6 +56,14 @@ data class Artwork(
     @ColumnInfo(name = "date_added")
     var dateAdded = Date()
 
+    /**
+     * Which screen this artwork is the current artwork for (see [Screen]). The
+     * home and lock screens keep independent timelines so the same provider can
+     * show a different image on each. Defaults to the home screen.
+     */
+    @ColumnInfo(name = "screen", defaultValue = "0")
+    var screen: Int = Screen.HOME.value
+
     companion object {
 
         fun getContentUri(id: Long): Uri {

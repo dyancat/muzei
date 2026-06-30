@@ -333,7 +333,8 @@ class ChooseProviderFragment : Fragment() {
                         }
                         navController.navigate(
                             ChooseProviderFragmentDirections.browse(
-                                ProviderContract.getContentUri(providerInfo.authority)
+                                ProviderContract.getContentUri(providerInfo.authority),
+                                screen = ChooseProviderScreen.value.value
                             )
                         )
                     }

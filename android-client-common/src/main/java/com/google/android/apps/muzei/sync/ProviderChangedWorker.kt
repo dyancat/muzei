@@ -42,6 +42,7 @@ import com.google.android.apps.muzei.api.provider.ProviderContract
 import com.google.android.apps.muzei.render.isValidImage
 import com.google.android.apps.muzei.room.MuzeiDatabase
 import com.google.android.apps.muzei.room.Provider
+import com.google.android.apps.muzei.room.Screen
 import com.google.android.apps.muzei.util.ContentProviderClientCompat
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withContext
@@ -193,10 +194,12 @@ class ProviderChangedWorker(
                 scheduleObserver(applicationContext, this)
             }
         }
-        // Now actually handle the provider change for every active provider
-        // (home and, when unlinked, lock), de-duplicated when both screens share one.
+        // Now actually handle the provider change for every selected provider row
+        // (home and, when unlinked, lock). Rows are kept distinct per screen — not
+        // de-duplicated by authority — so the two screens stay independent even when
+        // they share a provider.
         val database = MuzeiDatabase.getInstance(applicationContext)
-        val providers = database.providerDao().getAllProviders().distinctBy { it.authority }
+        val providers = database.providerDao().getAllProviders()
         if (providers.isEmpty()) {
             return@withContext Result.failure()
         }
@@ -243,7 +246,8 @@ class ProviderChangedWorker(
                             if (BuildConfig.DEBUG) {
                                 Log.d(TAG, "Scheduling an immediate load")
                             }
-                            ArtworkLoadWorker.enqueueNext(applicationContext, provider.authority)
+                            ArtworkLoadWorker.enqueueNext(applicationContext,
+                                    Screen.fromValue(provider.screen))
                             enqueued = true
                         }
                     } else if (loadFrequencySeconds > 0) {
@@ -296,7 +300,7 @@ class ProviderChangedWorker(
             provider: Provider
     ): Boolean {
         MuzeiDatabase.getInstance(applicationContext).artworkDao()
-                .getCurrentArtworkForProvider(provider.authority)?.let { artwork ->
+                .getCurrentArtworkForProvider(provider.authority, provider.screen)?.let { artwork ->
                     client.query(artwork.imageUri)?.use { cursor ->
                         val contentUri = ProviderContract.getContentUri(provider.authority)
                         return cursor.moveToNext() && isValidArtwork(client, contentUri, cursor)

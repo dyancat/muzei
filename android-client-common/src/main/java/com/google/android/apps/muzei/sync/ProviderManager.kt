@@ -351,11 +351,15 @@ class ProviderManager private constructor(private val context: Context)
     fun nextArtwork(screen: Screen = Screen.HOME) {
         GlobalScope.launch {
             val providerDao = MuzeiDatabase.getInstance(context).providerDao()
-            // Advance the given screen's provider, falling back to the home
-            // provider when the lock screen is linked (has no provider of its own).
-            val authority = providerDao.getProvider(screen.value)?.authority
-                    ?: providerDao.getCurrentProvider()?.authority
-            ArtworkLoadWorker.enqueueNext(context, authority)
+            // When the lock screen is linked (has no provider of its own) it shows the
+            // home artwork, so advance the home screen instead.
+            val targetScreen = if (screen == Screen.LOCK &&
+                    providerDao.getProvider(Screen.LOCK.value) == null) {
+                Screen.HOME
+            } else {
+                screen
+            }
+            ArtworkLoadWorker.enqueueNext(context, targetScreen)
         }
     }
 }
