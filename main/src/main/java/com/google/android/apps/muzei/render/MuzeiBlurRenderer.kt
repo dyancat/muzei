@@ -132,6 +132,12 @@ class MuzeiBlurRenderer(
     private val decodeScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var loadInProgress = false
     private var loadGeneration = 0
+    // While true, the live effect strengths are held steady (not eased) because a
+    // screen-switch crossfade is being prepared: the outgoing screen's effects must not
+    // drift toward the incoming screen's before the crossfade starts. present() snapshots
+    // the outgoing effects onto the outgoing picture set, snaps the live values to the new
+    // targets, and clears this flag.
+    private var effectHoldActive = false
 
     private var surfaceCreated: Boolean = false
 
@@ -218,12 +224,27 @@ class MuzeiBlurRenderer(
 
     /** Eases the effective effect strengths toward their targets. Returns true while still moving. */
     private fun easeEffectParams(): Boolean {
+        if (effectHoldActive) {
+            // A screen-switch crossfade is being prepared; hold the outgoing screen's
+            // effects steady (see effectHoldActive).
+            return false
+        }
         maxPrescaledBlurPixels = ease(maxPrescaledBlurPixels, targetPrescaledBlurPixels.toFloat())
         maxDim = ease(maxDim, targetDim.toFloat())
         maxGrey = ease(maxGrey, targetGrey.toFloat())
         return maxPrescaledBlurPixels != targetPrescaledBlurPixels.toFloat() ||
                 maxDim != targetDim.toFloat() ||
                 maxGrey != targetGrey.toFloat()
+    }
+
+    /**
+     * Hold the outgoing screen's effects steady ahead of a screen-switch crossfade so
+     * the incoming screen's effects don't bleed onto the previous screen's artwork while
+     * it fades out. Cleared by [present] once the crossfade is set up. Must run on the GL
+     * thread.
+     */
+    fun holdEffectsForScreenSwitch() {
+        effectHoldActive = true
     }
 
     private fun ease(current: Float, target: Float): Float {
@@ -234,12 +255,13 @@ class MuzeiBlurRenderer(
         return if (abs(next - target) < 1f) target else next
     }
 
-    /** Dim alpha (0..255 scale) for an artwork of the given [darkness], at the current dim setting. */
-    private fun dimAmountFor(darkness: Float): Float =
+    /** Dim alpha (0..255 scale) for an artwork of the given [darkness], at the given dim
+     *  setting (defaults to the live [maxDim]; the outgoing set passes its frozen dim). */
+    private fun dimAmountFor(darkness: Float, dim: Float = maxDim): Float =
         if (demoMode)
             DEMO_DIM.toFloat()
         else
-            maxDim * (1 - DIM_RANGE + DIM_RANGE * sqrt(darkness.toDouble()).toFloat())
+            dim * (1 - DIM_RANGE + DIM_RANGE * sqrt(darkness.toDouble()).toFloat())
 
     override fun onSurfaceCreated(unused: GL10, config: EGLConfig) {
         surfaceCreated = false
@@ -306,10 +328,12 @@ class MuzeiBlurRenderer(
             nextGLPictureSet.recomputeTransformMatrices()
         }
 
-        var dimAmount = dimAmountFor(currentGLPictureSet.darkness)
+        var dimAmount = dimAmountFor(currentGLPictureSet.darkness,
+                currentGLPictureSet.frozenDim ?: maxDim)
         currentGLPictureSet.drawFrame(1f)
         if (crossfadeAnimator.isRunning || onCrossFadeEnd != null) {
-            dimAmount = interpolate(dimAmount, dimAmountFor(nextGLPictureSet.darkness),
+            dimAmount = interpolate(dimAmount,
+                    dimAmountFor(nextGLPictureSet.darkness, nextGLPictureSet.frozenDim ?: maxDim),
                     crossfadeAnimator.currentValue)
             nextGLPictureSet.drawFrame(crossfadeAnimator.currentValue)
         }
@@ -352,8 +376,8 @@ class MuzeiBlurRenderer(
         }
     }
 
-    private fun blurRadiusAtFrame(f: Float): Float {
-        return maxPrescaledBlurPixels * blurInterpolator.getInterpolation(f / blurKeyframes)
+    private fun blurRadiusAtFrame(f: Float, blurPixels: Float = maxPrescaledBlurPixels): Float {
+        return blurPixels * blurInterpolator.getInterpolation(f / blurKeyframes)
     }
 
     fun setAndConsumeImageLoader(imageLoader: ImageLoader, immediate: Boolean = false) {
@@ -394,10 +418,12 @@ class MuzeiBlurRenderer(
 
     private fun present(decoded: DecodedArtwork?, immediate: Boolean) {
         if (decoded == null) {
+            effectHoldActive = false
             return
         }
         if (!surfaceCreated) {
             // Surface went away while we were decoding.
+            effectHoldActive = false
             decoded.recycle()
             return
         }
@@ -416,6 +442,20 @@ class MuzeiBlurRenderer(
         }
 
         nextGLPictureSet.applyDecoded(decoded)
+
+        if (!immediate) {
+            // Keep the outgoing screen's current effects on the outgoing set while it
+            // crossfades out, so a screen switch doesn't apply the incoming screen's
+            // effects to the previous screen's artwork. The incoming set uses the live
+            // values, which we jump to the new targets here.
+            currentGLPictureSet.frozenBlurPixels = maxPrescaledBlurPixels
+            currentGLPictureSet.frozenDim = maxDim
+            currentGLPictureSet.frozenGrey = maxGrey
+        }
+        // Adopt the (possibly new) screen's effects immediately for the incoming artwork
+        // and resume easing.
+        snapEffectParams()
+        effectHoldActive = false
 
         crossfadeAnimator.start(if (immediate) 1 else 0, 1) {
             // swap current and next picturesets
@@ -560,6 +600,15 @@ class MuzeiBlurRenderer(
         // Artwork luminance; the dim amount is computed from it live (see dimAmountFor).
         var darkness = 0f
 
+        // When non-null, this set draws with these frozen effect strengths instead of the
+        // renderer's live ones. Set on the outgoing set at the start of a screen-switch
+        // crossfade (see present) so the previous screen's effects stay put while the
+        // incoming set uses the new screen's effects. Discarded when the set is recycled
+        // after the crossfade.
+        var frozenBlurPixels: Float? = null
+        var frozenDim: Float? = null
+        var frozenGrey: Float? = null
+
         /**
          * Uploads the already-decoded [decoded] bitmaps as GL textures (the only part that must
          * run on the GL thread) and recycles them. The decode happened off-thread in [decode];
@@ -667,12 +716,15 @@ class MuzeiBlurRenderer(
             // blurFraction goes 0 (focused) -> 1 (fully blurred); grey ramps with it like the
             // original. Desaturation is applied at full resolution (on the sharp picture, and on
             // the blur overlay's composite) so grey stays sharp even when blur is light or off.
+            // Use this set's frozen effects while it crossfades out (see frozenBlurPixels),
+            // otherwise the renderer's live values.
+            val blurPixels = frozenBlurPixels ?: maxPrescaledBlurPixels
             val blurFraction = blurAnimator.currentValue / blurKeyframes
-            val grey = maxGrey / 500f * blurFraction
+            val grey = (frozenGrey ?: maxGrey) / 500f * blurFraction
             // How much of the blurred overlay shows: the focus fraction, faded in with the blur
             // radius so a tiny radius doesn't abruptly swap the full-res sharp for the downscaled
             // source. 0 -> sharp only (incl. grey-without-blur); 1 -> blur fully covers the sharp.
-            val blurMix = (maxPrescaledBlurPixels / BLUR_FADE_IN_PIXELS).coerceIn(0f, 1f)
+            val blurMix = (blurPixels / BLUR_FADE_IN_PIXELS).coerceIn(0f, 1f)
             val blurWeight = blurFraction * blurMix
 
             val overlay = blur
@@ -693,7 +745,7 @@ class MuzeiBlurRenderer(
             }
             overlay.drawBlurred(
                     mvpMatrix,
-                    blurRadiusAtFrame(blurAnimator.currentValue),
+                    blurRadiusAtFrame(blurAnimator.currentValue, blurPixels),
                     globalAlpha * blurWeight,
                     grey)
         }

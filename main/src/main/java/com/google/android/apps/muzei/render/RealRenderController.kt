@@ -95,6 +95,8 @@ class RealRenderController(
         }
         if (targetUri != currentArtworkUri) {
             currentArtworkUri = targetUri
+            // Keep the outgoing artwork's effects steady while it crossfades out.
+            holdEffectsForScreenSwitch()
             reloadCurrentArtwork()
         }
     }

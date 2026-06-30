@@ -257,8 +257,10 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
             setTouchEventsEnabled(true)
             setOffsetNotificationsEnabled(true)
             EffectsLockScreenOpen.collectIn(this) { isEffectsLockScreenOpen ->
-                renderController.onLockScreen = isEffectsLockScreenOpen
+                // Switch the artwork first so the effect change applies to the incoming
+                // screen, not the outgoing one mid-crossfade.
                 updateActiveScreen()
+                renderController.onLockScreen = isEffectsLockScreenOpen
             }
             // While the app is in front, previewing the lock-screen tab of the
             // provider chooser shows that screen's provider artwork.

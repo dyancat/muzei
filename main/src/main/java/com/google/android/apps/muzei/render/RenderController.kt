@@ -141,6 +141,15 @@ abstract class RenderController(
      */
     protected open fun onActiveScreenChanged(screen: Screen) {}
 
+    /**
+     * Hold the outgoing screen's effects steady ahead of a crossfade to a different
+     * screen's artwork, so the incoming screen's effects don't bleed onto the
+     * previous screen as it fades out. Call immediately before [reloadCurrentArtwork].
+     */
+    protected fun holdEffectsForScreenSwitch() {
+        callbacks.queueEventOnGlThread { renderer.holdEffectsForScreenSwitch() }
+    }
+
     fun reloadCurrentArtwork(reloadType: ReloadType = ReloadWhenVisible) {
         if (destroyed) {
             // Don't reload artwork for destroyed RenderControllers

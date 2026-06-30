@@ -194,8 +194,10 @@ class MuzeiRendererFragment : Fragment(), RenderController.Callbacks, MuzeiBlurR
             lifecycle.addObserver(renderController)
             if (!demoMode) {
                 EffectsLockScreenOpen.collectIn(this@MuzeiRendererFragment) { isEffectsLockScreenOpen ->
-                    renderController.onLockScreen = isEffectsLockScreenOpen
+                    // Switch the artwork first so the effect change applies to the
+                    // incoming screen, not the outgoing one mid-crossfade.
                     updateActiveScreen()
+                    renderController.onLockScreen = isEffectsLockScreenOpen
                 }
                 // Previewing the lock-screen tab of the effects or provider-chooser UI
                 // shows that screen's provider artwork; otherwise default to home.
