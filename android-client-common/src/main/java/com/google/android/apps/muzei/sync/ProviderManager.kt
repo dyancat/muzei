@@ -177,6 +177,10 @@ class ProviderManager private constructor(private val context: Context)
     private val artworkLiveData by lazy {
         MuzeiDatabase.getInstance(context).artworkDao().getCurrentArtworkLiveData()
     }
+    private val lockArtworkLiveData by lazy {
+        MuzeiDatabase.getInstance(context).artworkDao()
+                .getCurrentArtworkLiveData(Screen.LOCK.value)
+    }
     /**
      * The set of currently selected providers (home and, when unlinked, lock),
      * cached so the package-change receiver and artwork load can react to all of
@@ -207,6 +211,26 @@ class ProviderManager private constructor(private val context: Context)
             }
         } else {
             nextArtworkJob?.cancel()
+        }
+    }
+    private var nextLockArtworkJob: Job? = null
+    @OptIn(DelicateCoroutinesApi::class)
+    private val lockArtworkObserver = Observer<Artwork?> { artwork ->
+        if (artwork == null) {
+            // No lock-screen artwork yet. If the lock screen has its own provider
+            // (i.e. it isn't linked to home), pull its first artwork; otherwise the
+            // null intentionally means "linked", and it shows the home artwork.
+            nextLockArtworkJob?.cancel()
+            nextLockArtworkJob = GlobalScope.launch {
+                delay(1000)
+                if (nextLockArtworkJob?.isCancelled == false &&
+                        MuzeiDatabase.getInstance(context).providerDao()
+                                .getProvider(Screen.LOCK.value) != null) {
+                    nextArtwork(Screen.LOCK)
+                }
+            }
+        } else {
+            nextLockArtworkJob?.cancel()
         }
     }
 
@@ -272,6 +296,7 @@ class ProviderManager private constructor(private val context: Context)
         providerLiveData.observeForever(this)
         allProvidersLiveData.observeForever(allProvidersObserver)
         artworkLiveData.observeForever(artworkObserver)
+        lockArtworkLiveData.observeForever(lockArtworkObserver)
         // allProvidersObserver kicks off the initial load once the provider set
         // is delivered; an empty set means there is nothing to load yet.
     }
@@ -329,7 +354,9 @@ class ProviderManager private constructor(private val context: Context)
 
     override fun onInactive() {
         nextArtworkJob?.cancel()
+        nextLockArtworkJob?.cancel()
         artworkLiveData.removeObserver(artworkObserver)
+        lockArtworkLiveData.removeObserver(lockArtworkObserver)
         allProvidersLiveData.removeObserver(allProvidersObserver)
         // Clear the cache so the next activation observes an empty -> selected
         // transition and kicks off a fresh load.

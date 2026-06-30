@@ -76,6 +76,13 @@ abstract class ArtworkDao {
         inner join provider on providerAuthority = authority and provider.screen = artwork.screen
         WHERE artwork.screen = :screen
         ORDER BY date_added DESC""")
+    abstract fun getCurrentArtworkLiveData(screen: Int): LiveData<Artwork?>
+
+    @Query("""
+        SELECT artwork.* FROM artwork
+        inner join provider on providerAuthority = authority and provider.screen = artwork.screen
+        WHERE artwork.screen = :screen
+        ORDER BY date_added DESC""")
     abstract suspend fun getCurrentArtwork(screen: Int): Artwork?
 
     @Insert
