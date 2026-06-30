@@ -103,6 +103,7 @@
 
     <string name="tasker_setting_dialog_title">Select action</string>
     <string name="tasker_action_select_provider">Select <xliff:g id="source_name" example="Nice Wallpapers">%s</xliff:g></string>
+    <string name="tasker_action_select_provider_lock">Select <xliff:g id="source_name" example="Nice Wallpapers">%s</xliff:g> (lock screen)</string>
 
     <string name="actions_gestures">Customize Gestures</string>
     <string name="gestures_title">Gestures</string>

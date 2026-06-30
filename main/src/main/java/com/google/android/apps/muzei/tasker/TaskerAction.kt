@@ -18,18 +18,22 @@ package com.google.android.apps.muzei.tasker
 
 import android.os.Bundle
 import androidx.savedstate.savedState
+import com.google.android.apps.muzei.room.Screen
 
 private const val ACTION_NEXT_ARTWORK = "next_artwork"
 private const val ACTION_SELECT_PROVIDER = "select_provider"
 private const val EXTRA_ACTION = "com.google.android.apps.muzei.TASKER_ACTION"
 private const val EXTRA_PROVIDER_AUTHORITY = "com.google.android.apps.muzei.PROVIDER_NAME"
+private const val EXTRA_PROVIDER_SCREEN = "com.google.android.apps.muzei.PROVIDER_SCREEN"
 
 internal sealed class TaskerAction {
 
     companion object {
         fun fromBundle(bundle: Bundle?) = when(bundle?.getString(EXTRA_ACTION)) {
             ACTION_SELECT_PROVIDER -> bundle.getString(EXTRA_PROVIDER_AUTHORITY)?.let { authority ->
-                SelectProviderAction(authority)
+                // Absent screen extra (tasks saved before per-screen support) means home.
+                val screen = Screen.fromValue(bundle.getInt(EXTRA_PROVIDER_SCREEN, Screen.HOME.value))
+                SelectProviderAction(authority, screen)
             } ?: InvalidAction
             else -> NextArtworkAction
         }
@@ -44,10 +48,14 @@ internal data object NextArtworkAction : TaskerAction() {
     }
 }
 
-internal class SelectProviderAction(val authority: String) : TaskerAction() {
+internal class SelectProviderAction(
+        val authority: String,
+        val screen: Screen = Screen.HOME
+) : TaskerAction() {
     override fun toBundle() = savedState {
         putString(EXTRA_ACTION, ACTION_SELECT_PROVIDER)
         putString(EXTRA_PROVIDER_AUTHORITY, authority)
+        putInt(EXTRA_PROVIDER_SCREEN, screen.value)
     }
 }
 

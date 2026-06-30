@@ -20,6 +20,7 @@ import android.app.Application
 import android.graphics.drawable.Drawable
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
+import com.google.android.apps.muzei.room.Screen
 import com.google.android.apps.muzei.room.getInstalledProviders
 import kotlinx.coroutines.flow.map
 import net.nurik.roman.muzei.R
@@ -70,13 +71,22 @@ internal class TaskerSettingViewModel(
         val pm = application.packageManager
         val actionsList = mutableListOf(nextArtworkAction)
         providers.forEach { providerInfo ->
+            val label = providerInfo.loadLabel(pm)
+            // Offer selecting this provider for the home screen and, separately, the
+            // lock screen, so a Tasker task can target either.
             actionsList.add(Action(
                     providerInfo.loadIcon(pm).apply {
                         setBounds(0, 0, imageSize, imageSize)
                     },
-                    application.getString(R.string.tasker_action_select_provider,
-                            providerInfo.loadLabel(pm)),
-                    SelectProviderAction(providerInfo.authority),
+                    application.getString(R.string.tasker_action_select_provider, label),
+                    SelectProviderAction(providerInfo.authority, Screen.HOME),
+                    providerInfo.packageName))
+            actionsList.add(Action(
+                    providerInfo.loadIcon(pm).apply {
+                        setBounds(0, 0, imageSize, imageSize)
+                    },
+                    application.getString(R.string.tasker_action_select_provider_lock, label),
+                    SelectProviderAction(providerInfo.authority, Screen.LOCK),
                     providerInfo.packageName))
         }
         actionsList.sortedWith(comparator)

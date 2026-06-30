@@ -49,7 +49,7 @@ class TaskerActionReceiver : BroadcastReceiver() {
                             param(FirebaseAnalytics.Param.ITEM_LIST_NAME, "providers")
                             param(FirebaseAnalytics.Param.CONTENT_TYPE, "tasker")
                         }
-                        ProviderManager.select(context, authority)
+                        ProviderManager.select(context, authority, selectedAction.screen)
                     }
                 }
                 is NextArtworkAction -> {
