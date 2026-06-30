@@ -99,9 +99,9 @@ abstract class ArtworkDao {
 
     @Query("""
         SELECT art1.* FROM artwork art1,
-        (SELECT _id, max(date_added) FROM artwork GROUP BY providerAuthority) as art2
+        (SELECT _id, max(date_added) FROM artwork GROUP BY providerAuthority, screen) as art2
         WHERE art1._id=art2._id""")
-    abstract fun getCurrentArtworkByProvider(): Flow<List<Artwork>>
+    abstract fun getCurrentArtworkByProviderAndScreen(): Flow<List<Artwork>>
 
     @Query("SELECT * FROM artwork WHERE _id=:id")
     internal abstract fun getArtworkByIdBlocking(id: Long): Artwork?

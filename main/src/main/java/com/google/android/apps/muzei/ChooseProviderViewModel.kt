@@ -152,15 +152,13 @@ class ChooseProviderViewModel(application: Application) : AndroidViewModel(appli
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), null)
 
     /**
-     * An authority to current artwork URI map
+     * A (provider authority, screen) to current artwork map, so each card can show the
+     * artwork for the screen currently being configured.
      */
-    private val currentArtworkByProvider = database.artworkDao().getCurrentArtworkByProvider()
+    private val currentArtworkByProviderAndScreen = database.artworkDao()
+      .getCurrentArtworkByProviderAndScreen()
       .map { artworkForProvider ->
-        val artworkMap = mutableMapOf<String, Artwork>()
-        artworkForProvider.forEach {  artwork ->
-            artworkMap[artwork.providerAuthority] = artwork
-        }
-        artworkMap
+        artworkForProvider.associateBy { it.providerAuthority to it.screen }
     }
 
     /**
@@ -185,9 +183,10 @@ class ChooseProviderViewModel(application: Application) : AndroidViewModel(appli
     val providers = combine(
             installedProviders,
             activeScreenAuthority,
-            currentArtworkByProvider,
-            descriptionInvalidationNanoTime
-    ) { installedProviders, providerAuthority, artworkForProvider, _ ->
+            currentArtworkByProviderAndScreen,
+            descriptionInvalidationNanoTime,
+            ChooseProviderScreen
+    ) { installedProviders, providerAuthority, artworkForProvider, _, screen ->
         installedProviders.map { providerInfo ->
             val authority = providerInfo.authority
             val selected = authority == providerAuthority
@@ -197,7 +196,10 @@ class ChooseProviderViewModel(application: Application) : AndroidViewModel(appli
                 descriptions[authority] = newDescription
                 newDescription
             }
-            val currentArtwork = artworkForProvider[authority]
+            // Show the artwork for the screen being configured, falling back to the
+            // home screen's artwork for this provider when it has none for that screen.
+            val currentArtwork = artworkForProvider[authority to screen.value]
+                    ?: artworkForProvider[authority to Screen.HOME.value]
             providerInfo.copy(
                     selected = selected,
                     description = description,
