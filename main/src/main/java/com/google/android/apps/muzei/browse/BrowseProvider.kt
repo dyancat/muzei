@@ -21,6 +21,7 @@ import android.app.PendingIntent
 import android.content.Context
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -35,6 +36,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -70,6 +72,7 @@ import coil3.compose.LocalAsyncImagePreviewHandler
 import com.google.android.apps.muzei.api.internal.ProtocolConstants.METHOD_MARK_ARTWORK_LOADED
 import com.google.android.apps.muzei.room.Artwork
 import com.google.android.apps.muzei.room.MuzeiDatabase
+import com.google.android.apps.muzei.room.Screen
 import com.google.android.apps.muzei.room.getCommands
 import com.google.android.apps.muzei.sync.ProviderManager
 import com.google.android.apps.muzei.theme.AppTheme
@@ -109,8 +112,16 @@ fun BrowseProvider(
     val coroutineScope = rememberCoroutineScope()
     var isRefreshing by remember { mutableStateOf(false) }
     val artworkList by viewModel.artwork.collectAsState(listOf())
+    val screenLabel = stringResource(
+        if (screen == Screen.LOCK.value) {
+            R.string.settings_lock_screen_title
+        } else {
+            R.string.settings_home_screen_title
+        }
+    )
     BrowseProviderScreen(
         label = label,
+        screenLabel = screenLabel,
         onUp = onUp,
         onRefresh = {
             coroutineScope.launch {
@@ -202,6 +213,7 @@ private suspend fun onActionClicked(
 @Composable
 fun BrowseProviderScreen(
     label: String? = null,
+    screenLabel: String? = null,
     onUp: () -> Unit = {},
     onRefresh: () -> Unit = {},
     isRefreshing: Boolean = false,
@@ -219,8 +231,17 @@ fun BrowseProviderScreen(
         topBar = {
             TopAppBar(
                 title = {
-                    label?.let {
-                        Text(text = it)
+                    Column {
+                        label?.let {
+                            Text(text = it)
+                        }
+                        screenLabel?.let {
+                            Text(
+                                text = it,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     }
                 },
                 navigationIcon = {
