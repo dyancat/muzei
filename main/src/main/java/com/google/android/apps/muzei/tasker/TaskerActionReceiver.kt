@@ -19,6 +19,8 @@ package com.google.android.apps.muzei.tasker
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import com.google.android.apps.muzei.room.MuzeiDatabase
+import com.google.android.apps.muzei.room.Screen
 import com.google.android.apps.muzei.sync.ProviderManager
 import com.google.android.apps.muzei.util.goAsync
 import com.google.firebase.Firebase
@@ -49,7 +51,16 @@ class TaskerActionReceiver : BroadcastReceiver() {
                             param(FirebaseAnalytics.Param.ITEM_LIST_NAME, "providers")
                             param(FirebaseAnalytics.Param.CONTENT_TYPE, "tasker")
                         }
-                        ProviderManager.select(context, authority, selectedAction.screen)
+                        // Tasker only ever updates the targeted screen's provider and
+                        // never the linked state: while the lock screen is linked to
+                        // home it has no provider row of its own, so selecting one
+                        // would implicitly unlink the screens — skip instead.
+                        val lockLinked = selectedAction.screen == Screen.LOCK &&
+                            MuzeiDatabase.getInstance(context).providerDao()
+                                .getProvider(Screen.LOCK.value) == null
+                        if (!lockLinked) {
+                            ProviderManager.select(context, authority, selectedAction.screen)
+                        }
                     }
                 }
                 is NextArtworkAction -> {
