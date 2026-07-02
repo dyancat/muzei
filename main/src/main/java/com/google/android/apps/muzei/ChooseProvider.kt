@@ -16,6 +16,7 @@
 
 package com.google.android.apps.muzei
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -46,7 +47,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberDrawerState
-import androidx.compose.material3.rememberTopAppBarState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -59,7 +59,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Devices.PHONE
 import androidx.compose.ui.tooling.preview.Devices.TABLET
@@ -108,12 +107,13 @@ fun ChooseProvider(
         // toolbar's Update button (and closes via the scrim or back).
         gesturesEnabled = false,
     ) {
-        val scrollBehavior =
-            TopAppBarDefaults.enterAlwaysScrollBehavior(rememberTopAppBarState())
         Scaffold(
-            modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
             topBar = {
-                Column {
+                // A light scrim behind the whole top area (app bar + tabs, including
+                // the status bar inset) so they stay legible over bright artwork.
+                Column(
+                    modifier = Modifier.background(Color.Black.copy(alpha = 0.3f)),
+                ) {
                     TopAppBar(
                         title = {},
                         actions = {
@@ -174,7 +174,6 @@ fun ChooseProvider(
                             actionIconContentColor = Color.White,
                             subtitleContentColor = Color.White,
                         ),
-                        scrollBehavior = scrollBehavior
                     )
                     SecondaryTabRow(
                         selectedTabIndex = pagerState.currentPage,
@@ -221,8 +220,10 @@ fun ChooseProvider(
                 LazyVerticalStaggeredGrid(
                     columns = StaggeredGridCells.Adaptive(minSize = 300.dp),
                     state = state,
+                    // Top padding matches the 16dp side padding, giving the grid the
+                    // same breathing room below the tabs.
                     contentPadding = innerPadding + PaddingValues(horizontal = 16.dp) +
-                            PaddingValues(bottom = 16.dp),
+                            PaddingValues(top = 16.dp, bottom = 16.dp),
                     verticalItemSpacing = 16.dp,
                     horizontalArrangement = Arrangement.spacedBy(16.dp),
                 ) {
