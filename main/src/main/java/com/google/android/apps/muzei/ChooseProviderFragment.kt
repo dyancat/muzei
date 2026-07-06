@@ -112,9 +112,15 @@ class ChooseProviderFragment : Fragment() {
             // computes the checkmark/artwork for the active screen and a selection
             // applies to it.
             val pagerState = rememberPagerState(initialPage = 0, pageCount = { 2 })
-            LifecycleStartEffect(pagerState.currentPage) {
+            // Drive the screen off targetPage, so the wallpaper preview starts
+            // crossfading as soon as a tab is tapped rather than waiting for the
+            // slide to finish. The renderer prefetches the inactive screen's
+            // artwork, so this swap is normally served from that cache instead of
+            // a full-resolution re-decode mid-slide.
+            val targetPage = pagerState.targetPage
+            LifecycleStartEffect(targetPage) {
                 ChooseProviderScreen.value =
-                    if (pagerState.currentPage == 1) Screen.LOCK else Screen.HOME
+                    if (targetPage == 1) Screen.LOCK else Screen.HOME
                 onStopOrDispose {
                     ChooseProviderScreen.value = Screen.HOME
                 }
@@ -150,7 +156,8 @@ class ChooseProviderFragment : Fragment() {
                 }
                 startActivityProviderAuthority = ""
             }
-            val providers by viewModel.providers.collectAsState()
+            val homeProviders by viewModel.homeProviders.collectAsState()
+            val lockProviders by viewModel.lockProviders.collectAsState()
             val context = LocalContext.current
             val pm = context.packageManager
             val resources = LocalResources.current
@@ -190,12 +197,16 @@ class ChooseProviderFragment : Fragment() {
             } else {
                 null
             }
-            ChooseProvider(
-                providers = providers + if (providers.isNotEmpty() && playStoreProviderInfo != null) {
-                    listOf(playStoreProviderInfo)
+            // Append the "get more sources" Play Store card to a non-empty list.
+            fun withPlayStore(list: List<ProviderInfo>) =
+                if (list.isNotEmpty() && playStoreProviderInfo != null) {
+                    list + playStoreProviderInfo
                 } else {
-                    emptyList()
-                },
+                    list
+                }
+            ChooseProvider(
+                homeProviders = withPlayStore(homeProviders),
+                lockProviders = withPlayStore(lockProviders),
                 pagerState = pagerState,
                 lockLinked = lockLinked,
                 onToggleLockLink = {

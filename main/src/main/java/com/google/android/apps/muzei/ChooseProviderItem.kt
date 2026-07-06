@@ -48,7 +48,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
+import androidx.compose.ui.graphics.Paint
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.painter.ColorPainter
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
@@ -68,10 +76,28 @@ import com.google.android.apps.muzei.theme.AppTheme
 import com.google.android.apps.muzei.util.rememberDrawablePainter
 import net.nurik.roman.muzei.R
 
+/**
+ * Draws the content fully desaturated, used together with a reduced alpha to
+ * grey out a disabled card.
+ */
+private fun Modifier.greyscale(): Modifier = drawWithCache {
+    val paint = Paint().apply {
+        colorFilter = ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(0f) })
+    }
+    onDrawWithContent {
+        drawIntoCanvas { canvas ->
+            canvas.saveLayer(Rect(Offset.Zero, size), paint)
+            drawContent()
+            canvas.restore()
+        }
+    }
+}
+
 @Composable
 fun ChooseProviderItem(
     providerInfo: ProviderInfo,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
     onClick: () -> Unit = {},
     onLongClick: () -> Unit = {},
     onSettingsClick: () -> Unit = {},
@@ -79,7 +105,8 @@ fun ChooseProviderItem(
 ) {
     Card(
         onClick = onClick,
-        modifier = modifier,
+        modifier = if (enabled) modifier else modifier.alpha(0.6f).greyscale(),
+        enabled = enabled,
     ) {
         // Title Row
         Row(
@@ -97,6 +124,7 @@ fun ChooseProviderItem(
                 modifier = Modifier
                     .size(40.dp)
                     .combinedClickable(
+                        enabled = enabled,
                         onLongClick = onLongClick,
                         onClick = onClick
                     ),
@@ -185,6 +213,7 @@ fun ChooseProviderItem(
                         if (settingsActivity != null) {
                             TextButton(
                                 onClick = onSettingsClick,
+                                enabled = enabled,
                                 colors = ButtonDefaults.textButtonColors(
                                     contentColor = contentColorFor(MaterialTheme.colorScheme.surfaceContainerHighest),
                                 ),
@@ -195,6 +224,7 @@ fun ChooseProviderItem(
                     }
                     TextButton(
                         onClick = onBrowseClick,
+                        enabled = enabled,
                         colors = ButtonDefaults.textButtonColors(
                             contentColor = contentColorFor(MaterialTheme.colorScheme.surfaceContainerHighest),
                         ),

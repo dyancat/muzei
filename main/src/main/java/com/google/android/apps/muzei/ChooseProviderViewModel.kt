@@ -34,6 +34,7 @@ import com.google.android.apps.muzei.room.MuzeiDatabase
 import com.google.android.apps.muzei.room.Screen
 import com.google.android.apps.muzei.room.getInstalledProviders
 import com.google.android.apps.muzei.sync.ProviderManager
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
@@ -122,18 +123,15 @@ class ChooseProviderViewModel(application: Application) : AndroidViewModel(appli
     }
 
     /**
-     * The authority selected for the screen the chooser is currently configuring.
-     * The lock screen falls back to the home provider when it is linked.
+     * The authority selected for each screen. The lock screen falls back to the
+     * home provider when it is linked (it has no provider of its own).
      */
-    private val activeScreenAuthority = combine(
-            ChooseProviderScreen,
+    private val homeScreenAuthority = currentProviderAuthority
+    private val lockScreenAuthority = combine(
             currentProviderAuthority,
             lockProviderAuthority
-    ) { screen, home, lock ->
-        when (screen) {
-            Screen.HOME -> home
-            Screen.LOCK -> lock ?: home
-        }
+    ) { home, lock ->
+        lock ?: home
     }
 
     /**
@@ -173,20 +171,27 @@ class ChooseProviderViewModel(application: Application) : AndroidViewModel(appli
     private val descriptionInvalidationNanoTime = MutableStateFlow(0L)
 
     /**
-     * Combine all of the separate signals we have into one final set of [ProviderInfo]:
-     * - The set of installed providers
-     * - the currently selected provider
-     * - the current artwork for each provider
-     * - the input signal for when the descriptions have been invalidated (we don't
-     * care about the value, but we do want to recompute the [ProviderInfo] values)
+     * Builds the [ProviderInfo] list for a single [screen] by combining:
+     * - the set of installed providers
+     * - [selectedAuthority], the provider selected for that screen
+     * - the current artwork for each provider on that screen
+     * - the description invalidation signal (its value is ignored; it only
+     *   forces a recompute)
+     *
+     * Each screen gets its own list so the home and lock pager pages stay
+     * independent and stable: a page's checkmark and artwork are those of its
+     * own screen and don't change (or animate) when the other tab is selected.
      */
-    val providers = combine(
+    private fun providersForScreen(
+            screen: Screen,
+            selectedAuthority: Flow<String?>
+    ) = combine(
             installedProviders,
-            activeScreenAuthority,
+            selectedAuthority,
             currentArtworkByProviderAndScreen,
-            descriptionInvalidationNanoTime,
-            ChooseProviderScreen
-    ) { installedProviders, providerAuthority, artworkForProvider, _, screen ->
+            descriptionInvalidationNanoTime
+    ) { installedProviders, providerAuthority, artworkForProvider, _ ->
+        val application = getApplication<Application>()
         installedProviders.map { providerInfo ->
             val authority = providerInfo.authority
             val selected = authority == providerAuthority
@@ -196,8 +201,8 @@ class ChooseProviderViewModel(application: Application) : AndroidViewModel(appli
                 descriptions[authority] = newDescription
                 newDescription
             }
-            // Show the artwork for the screen being configured, falling back to the
-            // home screen's artwork for this provider when it has none for that screen.
+            // Show the artwork for this screen, falling back to the home screen's
+            // artwork for this provider when it has none for that screen.
             val currentArtwork = artworkForProvider[authority to screen.value]
                     ?: artworkForProvider[authority to Screen.HOME.value]
             providerInfo.copy(
@@ -206,7 +211,15 @@ class ChooseProviderViewModel(application: Application) : AndroidViewModel(appli
                     currentArtworkUri = currentArtwork?.imageUri
             )
         }.sortedWith(comparator)
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyList())
+    }
+
+    /** The providers shown on the home screen tab. */
+    val homeProviders = providersForScreen(Screen.HOME, homeScreenAuthority)
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyList())
+
+    /** The providers shown on the lock screen tab. */
+    val lockProviders = providersForScreen(Screen.LOCK, lockScreenAuthority)
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyList())
 
     internal fun refreshDescription(authority: String) {
         // Remove the current description and trigger the invalidation

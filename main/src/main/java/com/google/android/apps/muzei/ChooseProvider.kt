@@ -18,16 +18,23 @@ package com.google.android.apps.muzei
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid
-import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
-import androidx.compose.foundation.lazy.staggeredgrid.items
-import androidx.compose.foundation.lazy.staggeredgrid.rememberLazyStaggeredGridState
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.LinkOff
@@ -78,10 +85,11 @@ import com.google.firebase.analytics.analytics
 import kotlinx.coroutines.launch
 import net.nurik.roman.muzei.R
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun ChooseProvider(
-    providers: List<ProviderInfo>,
+    homeProviders: List<ProviderInfo>,
+    lockProviders: List<ProviderInfo>,
     modifier: Modifier = Modifier,
     pagerState: PagerState = rememberPagerState(initialPage = 0, pageCount = { 2 }),
     lockLinked: Boolean = true,
@@ -203,49 +211,76 @@ fun ChooseProvider(
             contentColor = Color.White,
         ) { innerPadding ->
             // A page per screen (home/lock) so the user can swipe between the tabs.
-            // The provider list itself is the same on both pages; the selected
-            // checkmark and per-screen artwork update from the view model when the
-            // page settles (see ChooseProviderScreen).
-            HorizontalPager(state = pagerState) { _ ->
-                val state = rememberLazyStaggeredGridState()
-                LaunchedEffect(autoScrollToProviderAuthority) {
-                    val index = providers.indexOfFirst {
-                        it.authority == autoScrollToProviderAuthority
-                    }
-                    if (autoScrollToProviderAuthority != null && index != -1) {
-                        state.animateScrollToItem(index)
-                        onAutoScrollToProviderCompleted()
-                    }
-                }
-                LazyVerticalStaggeredGrid(
-                    columns = StaggeredGridCells.Adaptive(minSize = 300.dp),
-                    state = state,
-                    // Top padding matches the 16dp side padding, giving the grid the
-                    // same breathing room below the tabs.
-                    contentPadding = innerPadding + PaddingValues(horizontal = 16.dp) +
-                            PaddingValues(top = 16.dp, bottom = 16.dp),
-                    verticalItemSpacing = 16.dp,
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
-                ) {
-                    items(
-                        items = providers,
-                        key = { it.authority },
-                    ) { providerInfo ->
-                        ChooseProviderItem(
-                            providerInfo = providerInfo,
-                            onClick = {
-                                onClick(providerInfo)
-                            },
-                            onLongClick = {
-                                onLongClick(providerInfo)
-                            },
-                            onSettingsClick = {
-                                onSettingsClick(providerInfo)
-                            },
-                            onBrowseClick = {
-                                onBrowseClick(providerInfo)
+            // Each page renders its own screen's list, so a page's checkmark and
+            // artwork are fixed to that screen and don't change (or animate) when
+            // the other tab is selected.
+            //
+            // Keep the off-screen page composed (rather than the default of
+            // disposing it once settled). Each page is a full staggered grid of
+            // fairly heavy cards, and recomposing/measuring it from scratch on
+            // every swipe janks the slide animation.
+            HorizontalPager(
+                state = pagerState,
+                beyondViewportPageCount = 1,
+            ) { page ->
+                val pageProviders = if (page == 0) homeProviders else lockProviders
+                // While the lock screen is linked to home its provider can't be
+                // chosen separately, so its page is disabled until it's unlinked.
+                val pageEnabled = page == 0 || !lockLinked
+                // A non-lazy, scrolling flow rather than a LazyVerticalStaggeredGrid:
+                // a lazy grid nested in the pager composes items only while its own
+                // viewport is on-screen, so it disposes and recomposes a whole
+                // screenful of (fairly heavy) cards on every tab switch, janking the
+                // slide. Provider lists are short, so composing all cards up front
+                // and keeping both pages resident makes a switch a pure translation.
+                val scrollState = rememberScrollState()
+                BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                    val spacing = 16.dp
+                    val contentWidth = maxWidth - spacing * 2
+                    val columns = maxOf(1, ((contentWidth + spacing) / (300.dp + spacing)).toInt())
+                    val cardWidth = (contentWidth - spacing * (columns - 1)) / columns
+                    FlowRow(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .verticalScroll(scrollState)
+                            // Padding lives inside the scroll so the top/bottom
+                            // breathing room scrolls with the content, matching the
+                            // grid's old contentPadding.
+                            .padding(innerPadding + PaddingValues(all = spacing)),
+                        horizontalArrangement = Arrangement.spacedBy(spacing),
+                        verticalArrangement = Arrangement.spacedBy(spacing),
+                        maxItemsInEachRow = columns,
+                    ) {
+                        pageProviders.forEach { providerInfo ->
+                            val bringIntoView = remember { BringIntoViewRequester() }
+                            val isAutoScrollTarget =
+                                providerInfo.authority == autoScrollToProviderAuthority
+                            LaunchedEffect(isAutoScrollTarget) {
+                                if (isAutoScrollTarget) {
+                                    bringIntoView.bringIntoView()
+                                    onAutoScrollToProviderCompleted()
+                                }
                             }
-                        )
+                            ChooseProviderItem(
+                                providerInfo = providerInfo,
+                                modifier = Modifier
+                                    .width(cardWidth)
+                                    .bringIntoViewRequester(bringIntoView),
+                                enabled = pageEnabled,
+                                onClick = {
+                                    onClick(providerInfo)
+                                },
+                                onLongClick = {
+                                    onLongClick(providerInfo)
+                                },
+                                onSettingsClick = {
+                                    onSettingsClick(providerInfo)
+                                },
+                                onBrowseClick = {
+                                    onBrowseClick(providerInfo)
+                                }
+                            )
+                        }
                     }
                 }
             }
@@ -323,7 +358,8 @@ fun ChooseProviderPreview() {
             dynamicColor = false
         ) {
             ChooseProvider(
-                providers = providers,
+                homeProviders = providers,
+                lockProviders = providers,
             )
         }
     }
