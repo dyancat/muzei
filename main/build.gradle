@@ -77,17 +77,29 @@ android {
             shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), file('proguard-project.txt')
             signingConfig signingConfigs.release
+            // The committed google-services.json belongs to the upstream Muzei
+            // project, so uploading this fork's mapping file there is useless.
+            firebaseCrashlytics {
+                mappingFileUploadEnabled false
+            }
         }
 
         publicBeta.initWith(buildTypes.release)
         publicBeta {
             versionNameSuffix " " + versionProps['betaNumber']
+            // initWith doesn't carry over the firebaseCrashlytics extension
+            firebaseCrashlytics {
+                mappingFileUploadEnabled false
+            }
         }
 
         publicDebug.initWith(buildTypes.publicBeta)
         publicDebug {
             debuggable true
             versionNameSuffix " Debug " + versionProps['betaNumber']
+            firebaseCrashlytics {
+                mappingFileUploadEnabled false
+            }
         }
     }
 
