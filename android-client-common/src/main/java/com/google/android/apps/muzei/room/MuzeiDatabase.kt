@@ -40,7 +40,7 @@ import java.io.File
     autoMigrations = [
         AutoMigration(from = 4, to = 5)
     ],
-    version = 9
+    version = 11
 )
 abstract class MuzeiDatabase : RoomDatabase() {
 
@@ -64,7 +64,9 @@ abstract class MuzeiDatabase : RoomDatabase() {
                                 MIGRATION_5_6,
                                 Migration6to8(applicationContext),
                                 Migration7to8(applicationContext),
-                                MIGRATION_8_9)
+                                MIGRATION_8_9,
+                                MIGRATION_9_10,
+                                MIGRATION_10_11)
                         .build().also { database ->
                             database.invalidationTracker.addObserver(
                                     object : InvalidationTracker.Observer("artwork") {
@@ -371,6 +373,33 @@ abstract class MuzeiDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) {
                 // Drop the legacy source table
                 db.execSQL("DROP TABLE sources")
+            }
+        }
+
+        private val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Re-key the provider table from authority to screen so the home and
+                // lock screens can each select their own provider. The existing
+                // selection becomes the home screen (screen = 0); the lock screen
+                // falls back to home until it is given its own provider.
+                db.execSQL("CREATE TABLE provider2 ("
+                        + "screen INTEGER PRIMARY KEY NOT NULL,"
+                        + "authority TEXT NOT NULL,"
+                        + "supportsNextArtwork INTEGER NOT NULL)")
+                db.execSQL("INSERT INTO provider2 (screen, authority, supportsNextArtwork) "
+                        + "SELECT 0, authority, supportsNextArtwork FROM provider")
+                db.execSQL("DROP TABLE provider")
+                db.execSQL("ALTER TABLE provider2 RENAME TO provider")
+            }
+        }
+
+        private val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Tag each displayed artwork with the screen it belongs to so the
+                // home and lock screens keep independent timelines (and can show a
+                // different image even from the same provider). Existing artwork
+                // becomes the home screen's (screen = 0).
+                db.execSQL("ALTER TABLE artwork ADD COLUMN screen INTEGER NOT NULL DEFAULT 0")
             }
         }
     }

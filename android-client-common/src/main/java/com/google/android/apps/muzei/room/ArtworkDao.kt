@@ -31,44 +31,77 @@ abstract class ArtworkDao {
     @Query("SELECT * FROM artwork ORDER BY date_added DESC LIMIT 100")
     abstract suspend fun getArtwork(): List<Artwork>
 
+    // The no-arg queries below describe the HOME screen (screen = 0), keeping their
+    // original "the current artwork" meaning for existing callers. New per-screen call
+    // sites use the :screen overloads. The join matches each artwork to the provider
+    // selected for the SAME screen, and the artwork.screen filter keeps the home and
+    // lock timelines independent even when both screens use the same provider.
     @Query("""
-        SELECT artwork.* FROM artwork 
-        inner join provider on providerAuthority = authority
+        SELECT artwork.* FROM artwork
+        inner join provider on providerAuthority = authority and provider.screen = artwork.screen
+        WHERE artwork.screen = 0
         ORDER BY date_added DESC""")
     abstract fun getCurrentArtworkFlow(): Flow<Artwork?>
 
     @Query("""
         SELECT artwork.* FROM artwork
-        inner join provider on providerAuthority = authority
+        inner join provider on providerAuthority = authority and provider.screen = artwork.screen
+        WHERE artwork.screen = 0
         ORDER BY date_added DESC""")
     abstract fun getCurrentArtworkLiveData(): LiveData<Artwork?>
 
     @Query("""
         SELECT artwork.* FROM artwork
-        inner join provider on providerAuthority = authority
+        inner join provider on providerAuthority = authority and provider.screen = artwork.screen
+        WHERE artwork.screen = 0
         ORDER BY date_added DESC""")
     internal abstract fun getCurrentArtworkBlocking(): Artwork?
 
     @Query("""
         SELECT artwork.* FROM artwork
-        inner join provider on providerAuthority = authority
+        inner join provider on providerAuthority = authority and provider.screen = artwork.screen
+        WHERE artwork.screen = 0
         ORDER BY date_added DESC""")
     abstract suspend fun getCurrentArtwork(): Artwork?
+
+    @Query("""
+        SELECT artwork.* FROM artwork
+        inner join provider on providerAuthority = authority and provider.screen = artwork.screen
+        WHERE artwork.screen = :screen
+        ORDER BY date_added DESC""")
+    abstract fun getCurrentArtworkFlow(screen: Int): Flow<Artwork?>
+
+    @Query("""
+        SELECT artwork.* FROM artwork
+        inner join provider on providerAuthority = authority and provider.screen = artwork.screen
+        WHERE artwork.screen = :screen
+        ORDER BY date_added DESC""")
+    abstract fun getCurrentArtworkLiveData(screen: Int): LiveData<Artwork?>
+
+    @Query("""
+        SELECT artwork.* FROM artwork
+        inner join provider on providerAuthority = authority and provider.screen = artwork.screen
+        WHERE artwork.screen = :screen
+        ORDER BY date_added DESC""")
+    abstract suspend fun getCurrentArtwork(screen: Int): Artwork?
 
     @Insert
     abstract suspend fun insert(artwork: Artwork): Long
 
     @Query("""
         SELECT * FROM artwork
-        WHERE providerAuthority = :providerAuthority
+        WHERE providerAuthority = :providerAuthority AND screen = :screen
         ORDER BY date_added DESC""")
-    abstract suspend fun getCurrentArtworkForProvider(providerAuthority: String): Artwork?
+    abstract suspend fun getCurrentArtworkForProvider(
+            providerAuthority: String,
+            screen: Int
+    ): Artwork?
 
     @Query("""
         SELECT art1.* FROM artwork art1,
-        (SELECT _id, max(date_added) FROM artwork GROUP BY providerAuthority) as art2
+        (SELECT _id, max(date_added) FROM artwork GROUP BY providerAuthority, screen) as art2
         WHERE art1._id=art2._id""")
-    abstract fun getCurrentArtworkByProvider(): Flow<List<Artwork>>
+    abstract fun getCurrentArtworkByProviderAndScreen(): Flow<List<Artwork>>
 
     @Query("SELECT * FROM artwork WHERE _id=:id")
     internal abstract fun getArtworkByIdBlocking(id: Long): Artwork?

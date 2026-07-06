@@ -40,6 +40,7 @@ import com.google.android.apps.muzei.api.provider.ProviderContract
 import com.google.android.apps.muzei.room.Artwork
 import com.google.android.apps.muzei.room.MuzeiDatabase
 import com.google.android.apps.muzei.room.Provider
+import com.google.android.apps.muzei.room.Screen
 import com.google.android.apps.muzei.util.ContentProviderClientCompat
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.GlobalScope
@@ -93,11 +94,20 @@ class ProviderManager private constructor(private val context: Context)
                             .also { instance = it }
                 }
 
-        suspend fun select(context: Context, authority: String) {
-            val currentAuthority = getInstance(context).value?.authority
+        suspend fun select(context: Context, authority: String, screen: Screen = Screen.HOME) {
+            val providerDao = MuzeiDatabase.getInstance(context).providerDao()
+            val currentAuthority = providerDao.getProvider(screen.value)?.authority
             if (authority != currentAuthority) {
-                MuzeiDatabase.getInstance(context).providerDao().select(authority)
+                providerDao.select(authority, screen.value)
             }
+        }
+
+        /**
+         * Remove the lock screen's provider selection, "linking" the lock screen
+         * back to the home screen's provider.
+         */
+        suspend fun clearLock(context: Context) {
+            MuzeiDatabase.getInstance(context).providerDao().clearLock()
         }
 
         suspend fun requestLoad(context: Context, contentUri: Uri) {
@@ -127,22 +137,25 @@ class ProviderManager private constructor(private val context: Context)
     }
     private val packageChangeReceiver : BroadcastReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent?) {
-            val provider = value ?: return
             val packageName = intent?.data?.schemeSpecificPart
             val changedComponents = intent?.getStringArrayExtra(
                     Intent.EXTRA_CHANGED_COMPONENT_NAME_LIST) ?: emptyArray()
             val pm = context.packageManager
-            @Suppress("DEPRECATION")
-            @SuppressLint("InlinedApi")
-            val providerInfo = pm.resolveContentProvider(provider.authority,
-                    PackageManager.MATCH_DISABLED_COMPONENTS)
-            val providerComponentName = providerInfo?.name
-            val wholePackageChanged = changedComponents.any { it == packageName }
-            val providerChanged = providerInfo != null
-                    && changedComponents.any { it == providerComponentName }
-            if (providerInfo == null || (providerInfo.packageName == packageName
-                            && (wholePackageChanged || providerChanged))) {
-                // The selected provider changed, so restart loading
+            // Restart loading if any active provider (home and/or lock) was affected
+            val affected = activeProviders.distinctBy { it.authority }.any { provider ->
+                @Suppress("DEPRECATION")
+                @SuppressLint("InlinedApi")
+                val providerInfo = pm.resolveContentProvider(provider.authority,
+                        PackageManager.MATCH_DISABLED_COMPONENTS)
+                val providerComponentName = providerInfo?.name
+                val wholePackageChanged = changedComponents.any { it == packageName }
+                val providerChanged = providerInfo != null
+                        && changedComponents.any { it == providerComponentName }
+                providerInfo == null || (providerInfo.packageName == packageName
+                        && (wholePackageChanged || providerChanged))
+            }
+            if (affected) {
+                // A selected provider changed, so restart loading
                 startArtworkLoad()
             }
         }
@@ -158,8 +171,30 @@ class ProviderManager private constructor(private val context: Context)
     private val providerLiveData by lazy {
         MuzeiDatabase.getInstance(context).providerDao().getCurrentProviderLiveData()
     }
+    private val allProvidersLiveData by lazy {
+        MuzeiDatabase.getInstance(context).providerDao().getAllProvidersLiveData()
+    }
     private val artworkLiveData by lazy {
         MuzeiDatabase.getInstance(context).artworkDao().getCurrentArtworkLiveData()
+    }
+    private val lockArtworkLiveData by lazy {
+        MuzeiDatabase.getInstance(context).artworkDao()
+                .getCurrentArtworkLiveData(Screen.LOCK.value)
+    }
+    /**
+     * The set of currently selected providers (home and, when unlinked, lock),
+     * cached so the package-change receiver and artwork load can react to all of
+     * them without a database round-trip.
+     */
+    private var activeProviders: List<Provider> = emptyList()
+    private val allProvidersObserver = Observer<List<Provider>> { providers ->
+        val previous = activeProviders.map { it.authority }.toSet()
+        val current = providers.map { it.authority }.toSet()
+        activeProviders = providers
+        if (current != previous) {
+            // The set of selected providers changed (home or lock), restart loading
+            startArtworkLoad()
+        }
     }
     private var nextArtworkJob: Job? = null
     @OptIn(DelicateCoroutinesApi::class)
@@ -176,6 +211,26 @@ class ProviderManager private constructor(private val context: Context)
             }
         } else {
             nextArtworkJob?.cancel()
+        }
+    }
+    private var nextLockArtworkJob: Job? = null
+    @OptIn(DelicateCoroutinesApi::class)
+    private val lockArtworkObserver = Observer<Artwork?> { artwork ->
+        if (artwork == null) {
+            // No lock-screen artwork yet. If the lock screen has its own provider
+            // (i.e. it isn't linked to home), pull its first artwork; otherwise the
+            // null intentionally means "linked", and it shows the home artwork.
+            nextLockArtworkJob?.cancel()
+            nextLockArtworkJob = GlobalScope.launch {
+                delay(1000)
+                if (nextLockArtworkJob?.isCancelled == false &&
+                        MuzeiDatabase.getInstance(context).providerDao()
+                                .getProvider(Screen.LOCK.value) != null) {
+                    nextArtwork(Screen.LOCK)
+                }
+            }
+        } else {
+            nextLockArtworkJob?.cancel()
         }
     }
 
@@ -239,8 +294,11 @@ class ProviderManager private constructor(private val context: Context)
             ProviderChangedWorker.activeListeningStateChanged(context, true)
         }
         providerLiveData.observeForever(this)
+        allProvidersLiveData.observeForever(allProvidersObserver)
         artworkLiveData.observeForever(artworkObserver)
-        startArtworkLoad()
+        lockArtworkLiveData.observeForever(lockArtworkObserver)
+        // allProvidersObserver kicks off the initial load once the provider set
+        // is delivered; an empty set means there is nothing to load yet.
     }
 
     @OptIn(DelicateCoroutinesApi::class)
@@ -264,36 +322,45 @@ class ProviderManager private constructor(private val context: Context)
     }
 
     private fun startArtworkLoad() {
-        if (hasActiveObservers()) {
-            runIfValid(value) { currentSource ->
-                if (BuildConfig.DEBUG) {
-                    Log.d(TAG, "Starting artwork load")
-                }
+        if (!hasActiveObservers()) {
+            return
+        }
+        if (BuildConfig.DEBUG) {
+            Log.d(TAG, "Starting artwork load")
+        }
+        // Re-register the content observer for every active provider (home and,
+        // when unlinked, lock). Unregister first so we don't accumulate stale
+        // registrations for providers that are no longer selected.
+        context.contentResolver.unregisterContentObserver(contentObserver)
+        activeProviders.distinctBy { it.authority }.forEach { provider ->
+            runIfValid(provider) { valid ->
                 // Listen for MuzeiArtProvider changes
-                val contentUri = ProviderContract.getContentUri(currentSource.authority)
+                val contentUri = ProviderContract.getContentUri(valid.authority)
                 context.contentResolver.registerContentObserver(
                         contentUri, true, contentObserver)
-                ProviderChangedWorker.enqueueSelected(context)
             }
         }
+        ProviderChangedWorker.enqueueSelected(context)
     }
 
     override fun onChanged(value: Provider?) {
-        val existingProvider = this.value
+        // Track the home provider so consumers observing ProviderManager (e.g. the
+        // null -> default-provider fallback) see the home screen's selection.
+        // Loading is driven by allProvidersObserver, which covers both screens.
         this.value = value
-        runIfValid(value) { provider ->
-            if (existingProvider == null || provider.authority != existingProvider.authority) {
-                if (BuildConfig.DEBUG) {
-                    Log.d(TAG, "Provider changed to ${provider.authority}")
-                }
-                startArtworkLoad()
-            }
-        }
+        // Drop the home provider if it is no longer a valid ContentProvider
+        runIfValid(value) { }
     }
 
     override fun onInactive() {
         nextArtworkJob?.cancel()
+        nextLockArtworkJob?.cancel()
         artworkLiveData.removeObserver(artworkObserver)
+        lockArtworkLiveData.removeObserver(lockArtworkObserver)
+        allProvidersLiveData.removeObserver(allProvidersObserver)
+        // Clear the cache so the next activation observes an empty -> selected
+        // transition and kicks off a fresh load.
+        activeProviders = emptyList()
         providerLiveData.removeObserver(this)
         context.contentResolver.unregisterContentObserver(contentObserver)
         ArtworkLoadWorker.cancelPeriodic(context)
@@ -307,7 +374,19 @@ class ProviderManager private constructor(private val context: Context)
         }
     }
 
-    fun nextArtwork() {
-        ArtworkLoadWorker.enqueueNext(context)
+    @OptIn(DelicateCoroutinesApi::class)
+    fun nextArtwork(screen: Screen = Screen.HOME) {
+        GlobalScope.launch {
+            val providerDao = MuzeiDatabase.getInstance(context).providerDao()
+            // When the lock screen is linked (has no provider of its own) it shows the
+            // home artwork, so advance the home screen instead.
+            val targetScreen = if (screen == Screen.LOCK &&
+                    providerDao.getProvider(Screen.LOCK.value) == null) {
+                Screen.HOME
+            } else {
+                screen
+            }
+            ArtworkLoadWorker.enqueueNext(context, targetScreen)
+        }
     }
 }

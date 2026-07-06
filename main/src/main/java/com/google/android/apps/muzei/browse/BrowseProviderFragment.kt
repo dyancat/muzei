@@ -41,6 +41,7 @@ class BrowseProviderFragment : Fragment() {
         AppTheme {
             BrowseProvider(
                 contentUri = args.contentUri,
+                screen = args.screen,
                 onUp = {
                     val navController = findNavController()
                     if (navController.currentDestination?.id == R.id.browse_provider) {

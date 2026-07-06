@@ -51,6 +51,7 @@ import com.google.android.apps.muzei.render.RealRenderController
 import com.google.android.apps.muzei.render.RenderController
 import com.google.android.apps.muzei.room.Artwork
 import com.google.android.apps.muzei.room.MuzeiDatabase
+import com.google.android.apps.muzei.room.Screen
 import com.google.android.apps.muzei.room.contentUri
 import com.google.android.apps.muzei.room.openArtworkInfo
 import com.google.android.apps.muzei.settings.EffectsLockScreenOpen
@@ -256,7 +257,15 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
             setTouchEventsEnabled(true)
             setOffsetNotificationsEnabled(true)
             EffectsLockScreenOpen.collectIn(this) { isEffectsLockScreenOpen ->
+                // Switch the artwork first so the effect change applies to the incoming
+                // screen, not the outgoing one mid-crossfade.
+                updateActiveScreen()
                 renderController.onLockScreen = isEffectsLockScreenOpen
+            }
+            // While the app is in front, previewing the lock-screen tab of the
+            // provider chooser shows that screen's provider artwork.
+            ChooseProviderScreen.collectIn(this) {
+                updateActiveScreen()
             }
             ArtDetailOpen.collectIn(this) { isArtDetailOpened ->
                 cancelDelayedBlur()
@@ -398,6 +407,10 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
                 // here won't cause the launcher offset jump — flush any deferred colours update.
                 flushPendingColors()
             }
+            // Render the artwork for the screen now in front (see updateActiveScreen).
+            // When the lock screen is linked to home this resolves to the same artwork
+            // and is a no-op; when unlinked it crossfades to the lock provider's artwork.
+            updateActiveScreen()
             // Crossfades that start while Muzei isn't the visible surface (e.g. unlocking to
             // an app rather than the home screen) used to stall and flicker on resume. That is
             // now handled by keeping the engine rendering in the background (onVisibilityChanged)
@@ -406,6 +419,20 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
             if (!EffectsLockScreenOpen.value) {
                 renderController.onLockScreen = isLockScreenVisible
             }
+        }
+
+        /**
+         * Choose which screen's artwork the wallpaper renders. The real lock screen
+         * always wins; otherwise, while the app is in front, the lock-screen tab of
+         * the effects or provider-chooser UI previews the lock provider's artwork.
+         * Everything else defaults to the home screen. When the lock screen is linked
+         * to home this resolves to the same artwork, so it's a no-op.
+         */
+        private fun updateActiveScreen() {
+            val showLock = lockScreenVisible ||
+                    EffectsLockScreenOpen.value ||
+                    ChooseProviderScreen.value == Screen.LOCK
+            renderController.activeScreen = if (showLock) Screen.LOCK else Screen.HOME
         }
 
         override fun onVisibilityChanged(visible: Boolean) {
@@ -489,7 +516,8 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
                             Firebase.analytics.logEvent("next_artwork") {
                                 param(FirebaseAnalytics.Param.CONTENT_TYPE, type)
                             }
-                            ProviderManager.getInstance(this@MuzeiWallpaperService).nextArtwork()
+                            ProviderManager.getInstance(this@MuzeiWallpaperService)
+                                    .nextArtwork(renderController.activeScreen)
                         }
                     }
                 }
@@ -499,7 +527,7 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
                             val artwork = MuzeiDatabase
                                 .getInstance(this@MuzeiWallpaperService)
                                 .artworkDao()
-                                .getCurrentArtwork()
+                                .getCurrentArtwork(renderController.activeScreen.value)
                             artwork?.run {
                                 Firebase.analytics.logEvent("artwork_info_open") {
                                     param(FirebaseAnalytics.Param.CONTENT_TYPE, type)

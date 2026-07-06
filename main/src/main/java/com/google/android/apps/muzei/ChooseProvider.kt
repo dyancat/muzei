@@ -16,14 +16,28 @@
 
 package com.google.android.apps.muzei
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid
-import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
-import androidx.compose.foundation.lazy.staggeredgrid.items
-import androidx.compose.foundation.lazy.staggeredgrid.rememberLazyStaggeredGridState
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerState
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Update
 import androidx.compose.material3.DrawerDefaults
@@ -34,11 +48,12 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SecondaryTabRow
+import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberDrawerState
-import androidx.compose.material3.rememberTopAppBarState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -51,7 +66,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Devices.PHONE
 import androidx.compose.ui.tooling.preview.Devices.TABLET
@@ -71,11 +85,15 @@ import com.google.firebase.analytics.analytics
 import kotlinx.coroutines.launch
 import net.nurik.roman.muzei.R
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun ChooseProvider(
-    providers: List<ProviderInfo>,
+    homeProviders: List<ProviderInfo>,
+    lockProviders: List<ProviderInfo>,
     modifier: Modifier = Modifier,
+    pagerState: PagerState = rememberPagerState(initialPage = 0, pageCount = { 2 }),
+    lockLinked: Boolean = true,
+    onToggleLockLink: () -> Unit = {},
     drawerSheetContent: @Composable ColumnScope.() -> Unit = {},
     drawerSheetContainerColor: Color = DrawerDefaults.modalContainerColor,
     onNotificationSettingsClick: () -> Unit = {},
@@ -92,99 +110,178 @@ fun ChooseProvider(
         modifier = modifier,
         drawerState = drawerState,
         drawerSheetContainerColor = drawerSheetContainerColor,
+        // The Home/Lock tabs are a horizontal pager; disable the drawer's swipe-to-open
+        // so it doesn't fight that gesture. The Auto Advance drawer still opens from the
+        // toolbar's Update button (and closes via the scrim or back).
+        gesturesEnabled = false,
     ) {
-        val scrollBehavior =
-            TopAppBarDefaults.enterAlwaysScrollBehavior(rememberTopAppBarState())
         Scaffold(
-            modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
             topBar = {
-                TopAppBar(
-                    title = {},
-                    actions = {
-                        val coroutineScope = rememberCoroutineScope()
-                        IconButton(
-                            onClick = {
-                                coroutineScope.launch {
-                                    Firebase.analytics.logEvent("auto_advance_open", null)
-                                    drawerState.open()
+                // A light scrim behind the whole top area (app bar + tabs, including
+                // the status bar inset) so they stay legible over bright artwork.
+                Column(
+                    modifier = Modifier.background(Color.Black.copy(alpha = 0.3f)),
+                ) {
+                    TopAppBar(
+                        title = {},
+                        actions = {
+                            // On the lock screen tab, offer linking the lock screen
+                            // back to the home screen's provider (no separate source).
+                            if (pagerState.currentPage == 1) {
+                                IconButton(onClick = onToggleLockLink) {
+                                    Icon(
+                                        if (lockLinked) Icons.Default.Link
+                                        else Icons.Default.LinkOff,
+                                        contentDescription = stringResource(
+                                            if (lockLinked) R.string.action_link_lock_source
+                                            else R.string.action_link_lock_source_off
+                                        ),
+                                    )
                                 }
-                            },
-                        ) {
-                            Icon(
-                                Icons.Default.Update,
-                                contentDescription = stringResource(R.string.auto_advance_settings),
-                            )
-                        }
-                        // Show the menu items in a DropdownMenu
-                        var expanded by remember { mutableStateOf(false) }
-                        IconButton(onClick = { expanded = !expanded }) {
-                            Icon(
-                                Icons.Default.MoreVert,
-                                contentDescription = null
-                            )
-                        }
-                        DropdownMenu(
-                            expanded = expanded,
-                            onDismissRequest = { expanded = false }
-                        ) {
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.notification_settings)) },
+                            }
+                            val coroutineScope = rememberCoroutineScope()
+                            IconButton(
                                 onClick = {
-                                    expanded = false
-                                    onNotificationSettingsClick()
-                                }
+                                    coroutineScope.launch {
+                                        Firebase.analytics.logEvent("auto_advance_open", null)
+                                        drawerState.open()
+                                    }
+                                },
+                            ) {
+                                Icon(
+                                    Icons.Default.Update,
+                                    contentDescription = stringResource(R.string.auto_advance_settings),
+                                )
+                            }
+                            // Show the menu items in a DropdownMenu
+                            var expanded by remember { mutableStateOf(false) }
+                            IconButton(onClick = { expanded = !expanded }) {
+                                Icon(
+                                    Icons.Default.MoreVert,
+                                    contentDescription = null
+                                )
+                            }
+                            DropdownMenu(
+                                expanded = expanded,
+                                onDismissRequest = { expanded = false }
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.notification_settings)) },
+                                    onClick = {
+                                        expanded = false
+                                        onNotificationSettingsClick()
+                                    }
+                                )
+                            }
+                        },
+                        colors = TopAppBarDefaults.topAppBarColors(
+                            containerColor = Color.Transparent,
+                            scrolledContainerColor = Color.Transparent,
+                            navigationIconContentColor = Color.White,
+                            titleContentColor = Color.White,
+                            actionIconContentColor = Color.White,
+                            subtitleContentColor = Color.White,
+                        ),
+                    )
+                    SecondaryTabRow(
+                        selectedTabIndex = pagerState.currentPage,
+                        containerColor = Color.Transparent,
+                        contentColor = Color.White,
+                    ) {
+                        val tabCoroutineScope = rememberCoroutineScope()
+                        val tabs = listOf(
+                            stringResource(R.string.settings_home_screen_title),
+                            stringResource(R.string.settings_lock_screen_title),
+                        )
+                        tabs.forEachIndexed { index, tabTitle ->
+                            Tab(
+                                selected = pagerState.currentPage == index,
+                                onClick = {
+                                    tabCoroutineScope.launch {
+                                        pagerState.animateScrollToPage(index)
+                                    }
+                                },
+                                text = { Text(text = tabTitle) },
                             )
                         }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = Color.Transparent,
-                        scrolledContainerColor = Color.Transparent,
-                        navigationIconContentColor = Color.White,
-                        titleContentColor = Color.White,
-                        actionIconContentColor = Color.White,
-                        subtitleContentColor = Color.White,
-                    ),
-                    scrollBehavior = scrollBehavior
-                )
+                    }
+                }
             },
             containerColor = Color.Transparent,
             contentColor = Color.White,
         ) { innerPadding ->
-            val state = rememberLazyStaggeredGridState()
-            LaunchedEffect(autoScrollToProviderAuthority) {
-                val index = providers.indexOfFirst { it.authority == autoScrollToProviderAuthority }
-                if (autoScrollToProviderAuthority != null && index != -1) {
-                    state.animateScrollToItem(index)
-                    onAutoScrollToProviderCompleted()
-                }
-            }
-            LazyVerticalStaggeredGrid(
-                columns = StaggeredGridCells.Adaptive(minSize = 300.dp),
-                state = state,
-                contentPadding = innerPadding + PaddingValues(horizontal = 16.dp) +
-                        PaddingValues(bottom = 16.dp),
-                verticalItemSpacing = 16.dp,
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
-            ) {
-                items(
-                    items = providers,
-                    key = { it.authority },
-                ) { providerInfo ->
-                    ChooseProviderItem(
-                        providerInfo = providerInfo,
-                        onClick = {
-                            onClick(providerInfo)
-                        },
-                        onLongClick = {
-                            onLongClick(providerInfo)
-                        },
-                        onSettingsClick = {
-                            onSettingsClick(providerInfo)
-                        },
-                        onBrowseClick = {
-                            onBrowseClick(providerInfo)
+            // A page per screen (home/lock) so the user can swipe between the tabs.
+            // Each page renders its own screen's list, so a page's checkmark and
+            // artwork are fixed to that screen and don't change (or animate) when
+            // the other tab is selected.
+            //
+            // Keep the off-screen page composed (rather than the default of
+            // disposing it once settled). Each page is a full staggered grid of
+            // fairly heavy cards, and recomposing/measuring it from scratch on
+            // every swipe janks the slide animation.
+            HorizontalPager(
+                state = pagerState,
+                beyondViewportPageCount = 1,
+            ) { page ->
+                val pageProviders = if (page == 0) homeProviders else lockProviders
+                // While the lock screen is linked to home its provider can't be
+                // chosen separately, so its page is disabled until it's unlinked.
+                val pageEnabled = page == 0 || !lockLinked
+                // A non-lazy, scrolling flow rather than a LazyVerticalStaggeredGrid:
+                // a lazy grid nested in the pager composes items only while its own
+                // viewport is on-screen, so it disposes and recomposes a whole
+                // screenful of (fairly heavy) cards on every tab switch, janking the
+                // slide. Provider lists are short, so composing all cards up front
+                // and keeping both pages resident makes a switch a pure translation.
+                val scrollState = rememberScrollState()
+                BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                    val spacing = 16.dp
+                    val contentWidth = maxWidth - spacing * 2
+                    val columns = maxOf(1, ((contentWidth + spacing) / (300.dp + spacing)).toInt())
+                    val cardWidth = (contentWidth - spacing * (columns - 1)) / columns
+                    FlowRow(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .verticalScroll(scrollState)
+                            // Padding lives inside the scroll so the top/bottom
+                            // breathing room scrolls with the content, matching the
+                            // grid's old contentPadding.
+                            .padding(innerPadding + PaddingValues(all = spacing)),
+                        horizontalArrangement = Arrangement.spacedBy(spacing),
+                        verticalArrangement = Arrangement.spacedBy(spacing),
+                        maxItemsInEachRow = columns,
+                    ) {
+                        pageProviders.forEach { providerInfo ->
+                            val bringIntoView = remember { BringIntoViewRequester() }
+                            val isAutoScrollTarget =
+                                providerInfo.authority == autoScrollToProviderAuthority
+                            LaunchedEffect(isAutoScrollTarget) {
+                                if (isAutoScrollTarget) {
+                                    bringIntoView.bringIntoView()
+                                    onAutoScrollToProviderCompleted()
+                                }
+                            }
+                            ChooseProviderItem(
+                                providerInfo = providerInfo,
+                                modifier = Modifier
+                                    .width(cardWidth)
+                                    .bringIntoViewRequester(bringIntoView),
+                                enabled = pageEnabled,
+                                onClick = {
+                                    onClick(providerInfo)
+                                },
+                                onLongClick = {
+                                    onLongClick(providerInfo)
+                                },
+                                onSettingsClick = {
+                                    onSettingsClick(providerInfo)
+                                },
+                                onBrowseClick = {
+                                    onBrowseClick(providerInfo)
+                                }
+                            )
                         }
-                    )
+                    }
                 }
             }
         }
@@ -261,7 +358,8 @@ fun ChooseProviderPreview() {
             dynamicColor = false
         ) {
             ChooseProvider(
-                providers = providers,
+                homeProviders = providers,
+                lockProviders = providers,
             )
         }
     }

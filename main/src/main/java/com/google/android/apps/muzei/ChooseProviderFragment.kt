@@ -35,6 +35,7 @@ import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -47,6 +48,7 @@ import androidx.compose.ui.platform.LocalResources
 import androidx.core.net.toUri
 import androidx.fragment.app.Fragment
 import androidx.fragment.compose.content
+import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.fragment.findNavController
@@ -54,6 +56,7 @@ import androidx.navigation.fragment.navArgs
 import com.google.android.apps.muzei.api.provider.MuzeiArtProvider
 import com.google.android.apps.muzei.api.provider.ProviderContract
 import com.google.android.apps.muzei.notifications.NotificationSettingsDialogFragment
+import com.google.android.apps.muzei.room.Screen
 import com.google.android.apps.muzei.sync.ProviderManager
 import com.google.android.apps.muzei.theme.AppTheme
 import com.google.android.apps.muzei.util.toast
@@ -62,9 +65,18 @@ import com.google.firebase.analytics.FirebaseAnalytics
 import com.google.firebase.analytics.analytics
 import com.google.firebase.analytics.logEvent
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import net.nurik.roman.muzei.R
+
+/**
+ * Which screen the provider chooser is currently configuring. Mirrors
+ * [com.google.android.apps.muzei.settings.EffectsLockScreenOpen] for the
+ * effects UI: it drives which screen's provider a selection applies to and
+ * which screen's selection shows the checkmark.
+ */
+val ChooseProviderScreen = MutableStateFlow(Screen.HOME)
 
 private class StartActivityFromSettings : ActivityResultContract<ComponentName, Boolean>() {
     override fun createIntent(context: Context, input: ComponentName): Intent =
@@ -95,6 +107,26 @@ class ChooseProviderFragment : Fragment() {
             val viewModel: ChooseProviderViewModel = viewModel {
                 ChooseProviderViewModel(requireActivity().application)
             }
+            // Which screen (home/lock) the chooser is configuring, as a pager so the
+            // tabs can be swiped. Published to ChooseProviderScreen so the ViewModel
+            // computes the checkmark/artwork for the active screen and a selection
+            // applies to it.
+            val pagerState = rememberPagerState(initialPage = 0, pageCount = { 2 })
+            // Drive the screen off targetPage, so the wallpaper preview starts
+            // crossfading as soon as a tab is tapped rather than waiting for the
+            // slide to finish. The renderer prefetches the inactive screen's
+            // artwork, so this swap is normally served from that cache instead of
+            // a full-resolution re-decode mid-slide.
+            val targetPage = pagerState.targetPage
+            LifecycleStartEffect(targetPage) {
+                ChooseProviderScreen.value =
+                    if (targetPage == 1) Screen.LOCK else Screen.HOME
+                onStopOrDispose {
+                    ChooseProviderScreen.value = Screen.HOME
+                }
+            }
+            val lockLinked by viewModel.lockLinked.collectAsState()
+            val homeProviderAuthority by viewModel.homeProviderAuthority.collectAsState()
             var startActivityProviderAuthority by rememberSerializable { mutableStateOf("") }
             val providerSetupLauncher = rememberLauncherForActivityResult(
                 StartActivityFromSettings()
@@ -109,7 +141,7 @@ class ChooseProviderFragment : Fragment() {
                                 param(FirebaseAnalytics.Param.ITEM_LIST_NAME, "providers")
                                 param(FirebaseAnalytics.Param.CONTENT_TYPE, "after_setup")
                             }
-                            ProviderManager.select(context, provider)
+                            ProviderManager.select(context, provider, ChooseProviderScreen.value)
                         }
                     }
                 }
@@ -124,7 +156,8 @@ class ChooseProviderFragment : Fragment() {
                 }
                 startActivityProviderAuthority = ""
             }
-            val providers by viewModel.providers.collectAsState()
+            val homeProviders by viewModel.homeProviders.collectAsState()
+            val lockProviders by viewModel.lockProviders.collectAsState()
             val context = LocalContext.current
             val pm = context.packageManager
             val resources = LocalResources.current
@@ -164,11 +197,36 @@ class ChooseProviderFragment : Fragment() {
             } else {
                 null
             }
-            ChooseProvider(
-                providers = providers + if (providers.isNotEmpty() && playStoreProviderInfo != null) {
-                    listOf(playStoreProviderInfo)
+            // Append the "get more sources" Play Store card to a non-empty list.
+            fun withPlayStore(list: List<ProviderInfo>) =
+                if (list.isNotEmpty() && playStoreProviderInfo != null) {
+                    list + playStoreProviderInfo
                 } else {
-                    emptyList()
+                    list
+                }
+            ChooseProvider(
+                homeProviders = withPlayStore(homeProviders),
+                lockProviders = withPlayStore(lockProviders),
+                pagerState = pagerState,
+                lockLinked = lockLinked,
+                onToggleLockLink = {
+                    val context = requireContext()
+                    val home = homeProviderAuthority
+                    val currentlyLinked = lockLinked
+                    lifecycleScope.launch {
+                        withContext(NonCancellable) {
+                            if (currentlyLinked) {
+                                // Unlink: seed the lock screen from the home provider so the
+                                // user has a starting point they can then change.
+                                if (home != null) {
+                                    ProviderManager.select(context, home, Screen.LOCK)
+                                }
+                            } else {
+                                // Re-link the lock screen to the home provider.
+                                ProviderManager.clearLock(context)
+                            }
+                        }
+                    }
                 },
                 drawerSheetContent = {
                     AutoAdvance(
@@ -236,7 +294,8 @@ class ChooseProviderFragment : Fragment() {
                             }
                             lifecycleScope.launch {
                                 withContext(NonCancellable) {
-                                    ProviderManager.select(context, providerInfo.authority)
+                                    ProviderManager.select(context, providerInfo.authority,
+                                        ChooseProviderScreen.value)
                                 }
                             }
                         }
@@ -286,7 +345,8 @@ class ChooseProviderFragment : Fragment() {
                         }
                         navController.navigate(
                             ChooseProviderFragmentDirections.browse(
-                                ProviderContract.getContentUri(providerInfo.authority)
+                                ProviderContract.getContentUri(providerInfo.authority),
+                                screen = ChooseProviderScreen.value.value
                             )
                         )
                     }

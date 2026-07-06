@@ -87,6 +87,8 @@
     <string name="toast_link_effects">Home &amp; Lock screen effects are now linked</string>
     <string name="action_link_effects_off">Home &amp; Lock aren\'t linked together</string>
     <string name="toast_link_effects_off">Home &amp; Lock screen effects are no longer linked together</string>
+    <string name="action_link_lock_source">Lock screen uses the same source as home</string>
+    <string name="action_link_lock_source_off">Lock screen uses its own source</string>
     <string name="reset_advanced_settings_defaults">Reset sliders</string>
     <string name="play_store_not_found">Unable to open <xliff:g id="google_play">Google Play</xliff:g> Store.</string>
 
@@ -101,6 +103,7 @@
 
     <string name="tasker_setting_dialog_title">Select action</string>
     <string name="tasker_action_select_provider">Select <xliff:g id="source_name" example="Nice Wallpapers">%s</xliff:g></string>
+    <string name="tasker_action_select_provider_lock">Select <xliff:g id="source_name" example="Nice Wallpapers">%s</xliff:g> (lock screen)</string>
 
     <string name="actions_gestures">Customize Gestures</string>
     <string name="gestures_title">Gestures</string>

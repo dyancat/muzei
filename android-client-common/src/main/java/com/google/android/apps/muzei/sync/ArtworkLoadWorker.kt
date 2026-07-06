@@ -31,6 +31,7 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import androidx.work.workDataOf
 import com.google.android.apps.muzei.api.internal.ProtocolConstants
 import com.google.android.apps.muzei.api.internal.ProtocolConstants.KEY_MAX_LOADED_ARTWORK_ID
 import com.google.android.apps.muzei.api.internal.ProtocolConstants.KEY_RECENT_ARTWORK_IDS
@@ -43,6 +44,7 @@ import com.google.android.apps.muzei.api.provider.ProviderContract
 import com.google.android.apps.muzei.render.isValidImage
 import com.google.android.apps.muzei.room.Artwork
 import com.google.android.apps.muzei.room.MuzeiDatabase
+import com.google.android.apps.muzei.room.Screen
 import com.google.android.apps.muzei.util.ContentProviderClientCompat
 import com.google.android.apps.muzei.util.getLong
 import kotlinx.coroutines.CancellationException
@@ -64,11 +66,25 @@ class ArtworkLoadWorker(
     companion object {
         private const val TAG = "ArtworkLoad"
         private const val PERIODIC_TAG = "ArtworkLoadPeriodic"
+        private const val KEY_SCREEN = "screen"
+        private const val NO_SCREEN = -1
 
-        internal fun enqueueNext(context: Context) {
+        /**
+         * Enqueue an immediate artwork load. When [screen] is given, only that
+         * screen's provider is loaded (e.g. the visible screen when the user taps
+         * 'Next artwork'); otherwise every selected provider is loaded.
+         */
+        internal fun enqueueNext(context: Context, screen: Screen? = null) {
             val workManager = WorkManager.getInstance(context)
-            workManager.enqueueUniqueWork(TAG, ExistingWorkPolicy.REPLACE,
-                    OneTimeWorkRequestBuilder<ArtworkLoadWorker>().build())
+            // Use a per-screen work name so a 'next' load for one screen doesn't
+            // cancel an in-flight load for the other screen.
+            val workName = if (screen != null) "$TAG:${screen.value}" else TAG
+            val request = OneTimeWorkRequestBuilder<ArtworkLoadWorker>().apply {
+                if (screen != null) {
+                    setInputData(workDataOf(KEY_SCREEN to screen.value))
+                }
+            }.build()
+            workManager.enqueueUniqueWork(workName, ExistingWorkPolicy.REPLACE, request)
         }
 
         internal fun enqueuePeriodic(
@@ -98,19 +114,51 @@ class ArtworkLoadWorker(
     }
 
     override suspend fun doWork() = withContext(syncSingleThreadContext) {
-        // Load the artwork
         val database = MuzeiDatabase.getInstance(applicationContext)
-        val (authority) = database.providerDao()
-                .getCurrentProvider() ?: return@withContext Result.failure()
+        val loadOrdering = ProviderManager.getInstance(applicationContext).loadOrdering
+        val targetScreen = inputData.getInt(KEY_SCREEN, NO_SCREEN)
+        // A targeted load (e.g. 'Next artwork' on one screen) loads only that screen's
+        // provider; otherwise load every selected provider. Each (screen, provider) is
+        // its own unit, so the home and lock screens advance independently even when
+        // they share a provider.
+        val providers = if (targetScreen != NO_SCREEN) {
+            listOfNotNull(database.providerDao().getProvider(targetScreen))
+        } else {
+            database.providerDao().getAllProviders()
+        }
+        if (providers.isEmpty()) {
+            return@withContext Result.failure()
+        }
+        var success = false
+        var retry = false
+        for (provider in providers) {
+            when (loadArtwork(database, provider.screen, provider.authority, loadOrdering)) {
+                is Result.Success -> success = true
+                is Result.Retry -> retry = true
+                else -> { /* failure: move on to the next provider */ }
+            }
+        }
+        when {
+            success -> Result.success()
+            retry -> Result.retry()
+            else -> Result.failure()
+        }
+    }
+
+    private suspend fun loadArtwork(
+            database: MuzeiDatabase,
+            screenValue: Int,
+            authority: String,
+            loadOrdering: ProviderManager.LoadOrdering
+    ): Result {
         if (BuildConfig.DEBUG) {
             Log.d(TAG, "Artwork Load for $authority")
         }
-        val loadOrdering = ProviderManager.getInstance(applicationContext).loadOrdering
         val contentUri = ProviderContract.getContentUri(authority)
         try {
             ContentProviderClientCompat.getClient(applicationContext, contentUri)?.use { client ->
                 val result = client.call(METHOD_GET_LOAD_INFO)
-                        ?: return@withContext Result.failure()
+                        ?: return Result.failure()
                 val maxLoadedArtworkId = result.getLong(KEY_MAX_LOADED_ARTWORK_ID, 0L)
                 val recentArtworkIds = result.getRecentIds(KEY_RECENT_ARTWORK_IDS)
                 val startingArtworkId = when (loadOrdering) {
@@ -136,6 +184,7 @@ class ArtworkLoadWorker(
                             val validArtwork = checkForValidArtwork(client, contentUri, newArtwork)
                             if (validArtwork != null) {
                                 validArtwork.providerAuthority = authority
+                                validArtwork.screen = screenValue
                                 val artworkId = database.artworkDao().insert(validArtwork)
                                 if (BuildConfig.DEBUG) {
                                     Log.d(TAG, "Loaded ${validArtwork.imageUri} into id $artworkId")
@@ -149,7 +198,7 @@ class ArtworkLoadWorker(
                                     }
                                     client.call(METHOD_REQUEST_LOAD)
                                 }
-                                return@withContext Result.success()
+                                return Result.success()
                             }
                         }
                         if (BuildConfig.DEBUG) {
@@ -164,11 +213,12 @@ class ArtworkLoadWorker(
                         // Is there any artwork at all?
                         if (allArtwork.count == 0) {
                             Log.w(TAG, "Unable to find any artwork for $authority")
-                            return@withContext Result.failure()
+                            return Result.failure()
                         }
                         // Okay so there's at least some artwork.
-                        // Is it just the one artwork we're already showing?
-                        val currentArtwork = database.artworkDao().getCurrentArtwork()
+                        // Is it just the one artwork we're already showing on this screen?
+                        val currentArtwork = database.artworkDao()
+                                .getCurrentArtworkForProvider(authority, screenValue)
                         if (allArtwork.count == 1 && allArtwork.moveToFirst()) {
                             val artworkId = allArtwork.getLong(BaseColumns._ID)
                             val artworkUri = ContentUris.withAppendedId(contentUri, artworkId)
@@ -176,7 +226,7 @@ class ArtworkLoadWorker(
                                 if (BuildConfig.DEBUG) {
                                     Log.i(TAG, "Provider $authority only has one artwork")
                                 }
-                                return@withContext Result.failure()
+                                return Result.failure()
                             }
                         }
                         // We've loaded every artwork IN_ORDER, so we need to loop back around
@@ -185,12 +235,13 @@ class ArtworkLoadWorker(
                             if (allArtwork.moveToPosition(0)) {
                                 checkForValidArtwork(client, contentUri, allArtwork)?.apply {
                                     providerAuthority = authority
+                                    this.screen = screenValue
                                     val artworkId = database.artworkDao().insert(this)
                                     if (BuildConfig.DEBUG) {
                                         Log.d(TAG, "Loaded $imageUri into id $artworkId")
                                     }
                                     client.call(METHOD_MARK_ARTWORK_LOADED, imageUri.toString())
-                                    return@withContext Result.success()
+                                    return Result.success()
                                 }
                             }
                         }
@@ -240,12 +291,13 @@ class ArtworkLoadWorker(
                             if (allArtwork.moveToPosition(position)) {
                                 checkForValidArtwork(client, contentUri, allArtwork)?.apply {
                                     providerAuthority = authority
+                                    this.screen = screenValue
                                     val artworkId = database.artworkDao().insert(this)
                                     if (BuildConfig.DEBUG) {
                                         Log.d(TAG, "Loaded $imageUri into id $artworkId")
                                     }
                                     client.call(METHOD_MARK_ARTWORK_LOADED, imageUri.toString())
-                                    return@withContext Result.success()
+                                    return Result.success()
                                 }
                             }
                         }
@@ -261,7 +313,7 @@ class ArtworkLoadWorker(
                 else -> Log.i(TAG, "Provider $authority crashed while retrieving artwork: ${e.message}")
             }
         }
-        Result.retry()
+        return Result.retry()
     }
 
     private suspend fun checkForValidArtwork(

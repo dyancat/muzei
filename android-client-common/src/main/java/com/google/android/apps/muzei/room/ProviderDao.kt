@@ -30,22 +30,40 @@ import kotlinx.coroutines.flow.Flow
  */
 @Dao
 abstract class ProviderDao {
-    @Query("SELECT * FROM provider")
+    // The no-arg queries below describe the HOME screen (screen = 0). They retain
+    // their original "the current provider" meaning so the many existing callers
+    // and the public MuzeiContract ContentProvider stay correct and single-row.
+    @Query("SELECT * FROM provider WHERE screen = 0")
     abstract fun getCurrentProviderFlow(): Flow<Provider?>
 
-    @Query("SELECT * FROM provider")
+    @Query("SELECT * FROM provider WHERE screen = 0")
     abstract fun getCurrentProviderLiveData(): LiveData<Provider?>
 
-    @Query("SELECT * FROM provider")
+    @Query("SELECT * FROM provider WHERE screen = 0")
     internal abstract fun getCurrentProviderBlocking(): Provider?
 
-    @Query("SELECT * FROM provider")
+    @Query("SELECT * FROM provider WHERE screen = 0")
     abstract suspend fun getCurrentProvider(): Provider?
 
+    @Query("SELECT * FROM provider WHERE screen = :screen")
+    abstract fun getProviderFlow(screen: Int): Flow<Provider?>
+
+    @Query("SELECT * FROM provider WHERE screen = :screen")
+    abstract suspend fun getProvider(screen: Int): Provider?
+
+    @Query("SELECT * FROM provider")
+    abstract fun getAllProvidersFlow(): Flow<List<Provider>>
+
+    @Query("SELECT * FROM provider")
+    abstract fun getAllProvidersLiveData(): LiveData<List<Provider>>
+
+    @Query("SELECT * FROM provider")
+    abstract suspend fun getAllProviders(): List<Provider>
+
     @Transaction
-    open suspend fun select(authority: String) {
-        deleteAll()
-        insert(Provider(authority))
+    open suspend fun select(authority: String, screen: Int = Screen.HOME.value) {
+        deleteByScreen(screen)
+        insert(Provider(screen, authority))
     }
 
     @Insert
@@ -56,6 +74,16 @@ abstract class ProviderDao {
 
     @Delete
     abstract suspend fun delete(provider: Provider)
+
+    @Query("DELETE FROM provider WHERE screen = :screen")
+    internal abstract suspend fun deleteByScreen(screen: Int)
+
+    /**
+     * Remove the lock screen's provider selection, "linking" the lock screen back
+     * to the home screen's provider.
+     */
+    @Query("DELETE FROM provider WHERE screen = 1")
+    abstract suspend fun clearLock()
 
     @Query("DELETE FROM provider")
     internal abstract suspend fun deleteAll()

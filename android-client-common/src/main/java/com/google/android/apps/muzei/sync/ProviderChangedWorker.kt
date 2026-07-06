@@ -42,6 +42,7 @@ import com.google.android.apps.muzei.api.provider.ProviderContract
 import com.google.android.apps.muzei.render.isValidImage
 import com.google.android.apps.muzei.room.MuzeiDatabase
 import com.google.android.apps.muzei.room.Provider
+import com.google.android.apps.muzei.room.Screen
 import com.google.android.apps.muzei.util.ContentProviderClientCompat
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withContext
@@ -193,10 +194,36 @@ class ProviderChangedWorker(
                 scheduleObserver(applicationContext, this)
             }
         }
-        // Now actually handle the provider change
+        // Now actually handle the provider change for every selected provider row
+        // (home and, when unlinked, lock). Rows are kept distinct per screen — not
+        // de-duplicated by authority — so the two screens stay independent even when
+        // they share a provider.
         val database = MuzeiDatabase.getInstance(applicationContext)
-        val provider = database.providerDao()
-                .getCurrentProvider() ?: return@withContext Result.failure()
+        val providers = database.providerDao().getAllProviders()
+        if (providers.isEmpty()) {
+            return@withContext Result.failure()
+        }
+        var success = false
+        var retry = false
+        for (provider in providers) {
+            when (handleProviderChange(database, provider, tag)) {
+                is Result.Success -> success = true
+                is Result.Retry -> retry = true
+                else -> { /* failure: move on to the next provider */ }
+            }
+        }
+        when {
+            success -> Result.success()
+            retry -> Result.retry()
+            else -> Result.failure()
+        }
+    }
+
+    private suspend fun handleProviderChange(
+            database: MuzeiDatabase,
+            provider: Provider,
+            tag: String
+    ): Result {
         if (BuildConfig.DEBUG) {
             Log.d(TAG, "Provider Change ($tag) for ${provider.authority}")
         }
@@ -204,7 +231,7 @@ class ProviderChangedWorker(
         try {
             ContentProviderClientCompat.getClient(applicationContext, contentUri)?.use { client ->
                 val result = client.call(METHOD_GET_LOAD_INFO)
-                        ?: return@withContext Result.retry()
+                        ?: return Result.retry()
                 val lastLoadedTime = result.getLong(KEY_LAST_LOADED_TIME, 0L)
                 client.query(contentUri)?.use { allArtwork ->
                     val providerManager = ProviderManager.getInstance(applicationContext)
@@ -219,7 +246,8 @@ class ProviderChangedWorker(
                             if (BuildConfig.DEBUG) {
                                 Log.d(TAG, "Scheduling an immediate load")
                             }
-                            ArtworkLoadWorker.enqueueNext(applicationContext)
+                            ArtworkLoadWorker.enqueueNext(applicationContext,
+                                    Screen.fromValue(provider.screen))
                             enqueued = true
                         }
                     } else if (loadFrequencySeconds > 0) {
@@ -255,7 +283,7 @@ class ProviderChangedWorker(
                         // and haven't just called enqueueNext / enqueuePeriodic
                         client.call(ProtocolConstants.METHOD_REQUEST_LOAD)
                     }
-                    return@withContext Result.success()
+                    return Result.success()
                 }
             }
         } catch (e: Exception) {
@@ -264,7 +292,7 @@ class ProviderChangedWorker(
                 else -> Log.i(TAG, "Provider ${provider.authority} crashed while retrieving artwork: ${e.message}")
             }
         }
-        Result.retry()
+        return Result.retry()
     }
 
     private suspend fun isCurrentArtworkValid(
@@ -272,7 +300,7 @@ class ProviderChangedWorker(
             provider: Provider
     ): Boolean {
         MuzeiDatabase.getInstance(applicationContext).artworkDao()
-                .getCurrentArtworkForProvider(provider.authority)?.let { artwork ->
+                .getCurrentArtworkForProvider(provider.authority, provider.screen)?.let { artwork ->
                     client.query(artwork.imageUri)?.use { cursor ->
                         val contentUri = ProviderContract.getContentUri(provider.authority)
                         return cursor.moveToNext() && isValidArtwork(client, contentUri, cursor)

@@ -21,6 +21,7 @@ import android.content.SharedPreferences
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.lifecycleScope
+import com.google.android.apps.muzei.room.Screen
 import com.google.android.apps.muzei.settings.Prefs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -66,6 +67,20 @@ abstract class RenderController(
                 // without re-decoding the artwork. Just kick a render to start the easing; it keeps
                 // running in the background (see MuzeiWallpaperEngine.onVisibilityChanged).
                 callbacks.requestRender()
+            }
+        }
+    /**
+     * Which screen's artwork the wallpaper is currently rendering. This is driven
+     * by the real keyguard state (see MuzeiWallpaperEngine.lockScreenVisibleChanged),
+     * not by the in-app effects preview. Changing it lets a subclass crossfade to
+     * that screen's provider artwork; when the lock screen is linked to home it
+     * resolves to the same artwork and is a no-op.
+     */
+    var activeScreen: Screen = Screen.HOME
+        set(value) {
+            if (field != value) {
+                field = value
+                onActiveScreenChanged(value)
             }
         }
     private lateinit var coroutineScope: CoroutineScope
@@ -119,6 +134,29 @@ abstract class RenderController(
     }
 
     protected abstract suspend fun openDownloadedCurrentArtwork(): ImageLoader
+
+    /**
+     * Called when [activeScreen] changes so subclasses can swap the rendered
+     * artwork to that screen's provider (crossfading from the current artwork).
+     */
+    protected open fun onActiveScreenChanged(screen: Screen) {}
+
+    /**
+     * Hold the outgoing screen's effects steady ahead of a crossfade to a different
+     * screen's artwork, so the incoming screen's effects don't bleed onto the
+     * previous screen as it fades out. Call immediately before [reloadCurrentArtwork].
+     */
+    protected fun holdEffectsForScreenSwitch() {
+        callbacks.queueEventOnGlThread { renderer.holdEffectsForScreenSwitch() }
+    }
+
+    /**
+     * Decode [imageLoader] ahead of time so a later switch to it (e.g. the inactive
+     * screen's artwork) is a texture upload rather than a fresh decode.
+     */
+    protected fun prefetchArtwork(imageLoader: ImageLoader) {
+        callbacks.queueEventOnGlThread { renderer.prefetch(imageLoader) }
+    }
 
     fun reloadCurrentArtwork(reloadType: ReloadType = ReloadWhenVisible) {
         if (destroyed) {
