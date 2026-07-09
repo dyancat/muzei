@@ -31,6 +31,7 @@ import android.provider.DocumentsContract
 import android.provider.DocumentsProvider
 import android.util.Log
 import com.google.android.apps.muzei.render.ImageLoader
+import com.google.android.apps.muzei.render.videoFrame
 import com.google.android.apps.muzei.room.Artwork
 import com.google.android.apps.muzei.room.MuzeiDatabase
 import kotlinx.coroutines.runBlocking
@@ -246,8 +247,8 @@ class MuzeiDocumentsProvider : DocumentsProvider() {
         val bitmap = ImageLoader.decode(
                 contentResolver, artworkUri,
                 sizeHint.x / 2, sizeHint.y / 2
-        ) ?: run {
-            // The artwork isn't there anymore. Delete it to
+        ) ?: contentResolver.videoFrame(artworkUri, sizeHint.x / 2, sizeHint.y / 2) ?: run {
+            // Not a decodable image or video, so the artwork isn't there anymore. Delete it to
             // revoke any document permissions attached to it
             DocumentsContract.deleteDocument(contentResolver,
                     DocumentsContract.buildDocumentUri(BuildConfig.DOCUMENTS_AUTHORITY,

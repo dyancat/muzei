@@ -40,6 +40,7 @@ import com.google.android.apps.muzei.api.internal.ProtocolConstants.METHOD_GET_L
 import com.google.android.apps.muzei.api.provider.MuzeiArtProvider
 import com.google.android.apps.muzei.api.provider.ProviderContract
 import com.google.android.apps.muzei.render.isValidImage
+import com.google.android.apps.muzei.render.videoMimeType
 import com.google.android.apps.muzei.room.MuzeiDatabase
 import com.google.android.apps.muzei.room.Provider
 import com.google.android.apps.muzei.util.ContentProviderClientCompat
@@ -289,17 +290,20 @@ class ProviderChangedWorker(
         val providerArtwork = com.google.android.apps.muzei.api.provider.Artwork.fromCursor(data)
         val artworkUri = ContentUris.withAppendedId(contentUri, providerArtwork.id)
         try {
-            client.openInputStream(artworkUri)?.use { inputStream ->
-                if (inputStream.isValidImage()) {
-                    return true
-                } else {
-                    if (BuildConfig.DEBUG) {
-                        Log.w(TAG, "Artwork $artworkUri is not a valid image")
-                    }
-                    // Tell the client that the artwork is invalid
-                    client.call(ProtocolConstants.METHOD_MARK_ARTWORK_INVALID, artworkUri.toString())
-                }
+            val isValidImage = client.openInputStream(artworkUri)?.use { inputStream ->
+                inputStream.isValidImage()
+            } ?: false
+            // Videos fail the still-image check, so also accept anything that resolves to a
+            // playable video track; otherwise the current video artwork would be marked invalid.
+            if (isValidImage ||
+                    applicationContext.contentResolver.videoMimeType(artworkUri) != null) {
+                return true
             }
+            if (BuildConfig.DEBUG) {
+                Log.w(TAG, "Artwork $artworkUri is not a valid image or video")
+            }
+            // Tell the client that the artwork is invalid
+            client.call(ProtocolConstants.METHOD_MARK_ARTWORK_INVALID, artworkUri.toString())
         } catch (e: IOException) {
             Log.i(TAG, "Unable to preload artwork $artworkUri: ${e.message}")
         } catch (e: Exception) {

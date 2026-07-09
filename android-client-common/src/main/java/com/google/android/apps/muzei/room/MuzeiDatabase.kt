@@ -40,7 +40,7 @@ import java.io.File
     autoMigrations = [
         AutoMigration(from = 4, to = 5)
     ],
-    version = 9
+    version = 10
 )
 abstract class MuzeiDatabase : RoomDatabase() {
 
@@ -64,7 +64,8 @@ abstract class MuzeiDatabase : RoomDatabase() {
                                 MIGRATION_5_6,
                                 Migration6to8(applicationContext),
                                 Migration7to8(applicationContext),
-                                MIGRATION_8_9)
+                                MIGRATION_8_9,
+                                MIGRATION_9_10)
                         .build().also { database ->
                             database.invalidationTracker.addObserver(
                                     object : InvalidationTracker.Observer("artwork") {
@@ -371,6 +372,14 @@ abstract class MuzeiDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) {
                 // Drop the legacy source table
                 db.execSQL("DROP TABLE sources")
+            }
+        }
+
+        private val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Record each artwork's media MIME type so the renderer can tell video from
+                // still images. Null for pre-existing rows, which are all images.
+                db.execSQL("ALTER TABLE artwork ADD COLUMN mimeType TEXT")
             }
         }
     }

@@ -77,6 +77,7 @@ import coil3.compose.AsyncImage
 import coil3.compose.AsyncImagePreviewHandler
 import coil3.compose.LocalAsyncImagePreviewHandler
 import com.google.android.apps.muzei.api.internal.ProtocolConstants.METHOD_MARK_ARTWORK_LOADED
+import com.google.android.apps.muzei.render.videoMimeType
 import com.google.android.apps.muzei.room.Artwork
 import com.google.android.apps.muzei.room.MuzeiDatabase
 import com.google.android.apps.muzei.room.getCommands
@@ -89,9 +90,11 @@ import com.google.firebase.Firebase
 import com.google.firebase.analytics.FirebaseAnalytics
 import com.google.firebase.analytics.analytics
 import com.google.firebase.analytics.logEvent
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import net.nurik.roman.muzei.R
 
 private const val REFRESH_DELAY = 300L // milliseconds
@@ -165,6 +168,11 @@ private suspend fun onArtworkClicked(
     }
     // Ensure the date added is set to the current time
     artwork.dateAdded.time = System.currentTimeMillis()
+    // Record the media type so the renderer plays video artwork rather than trying to decode it as
+    // a still image. This browse path inserts directly, bypassing ArtworkLoadWorker's detection.
+    artwork.mimeType = withContext(Dispatchers.IO) {
+        context.contentResolver.videoMimeType(artwork.imageUri) ?: "image/*"
+    }
     MuzeiDatabase.getInstance(context).artworkDao()
         .insert(artwork)
     client?.call(METHOD_MARK_ARTWORK_LOADED, artwork.imageUri.toString())

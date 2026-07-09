@@ -21,6 +21,7 @@ import android.content.res.AssetManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.util.Log
@@ -43,6 +44,73 @@ fun InputStream.isValidImage(): Boolean {
         outWidth != 0 && outHeight != 0 &&
                 (Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
                         outConfig == Bitmap.Config.ARGB_8888)
+    }
+}
+
+/**
+ * Probes [uri] with [MediaMetadataRetriever] to determine whether it resolves to a playable
+ * video (a container with a video track). Used to accept video artwork that would otherwise fail
+ * the still-image validation in [isValidImage].
+ *
+ * Returns the resolved MIME type (e.g. `video/mp4`) when it is a video, or `null` when it is not
+ * a video (or can't be read). The provider [uri]s Muzei validates return a cursor MIME from
+ * [ContentResolver.getType], not the media type, so this reads the container itself rather than
+ * trusting the reported type.
+ */
+fun ContentResolver.videoMimeType(uri: Uri): String? = try {
+    openAssetFileDescriptor(uri, "r")?.use { afd ->
+        val retriever = MediaMetadataRetriever()
+        try {
+            if (afd.declaredLength >= 0) {
+                retriever.setDataSource(afd.fileDescriptor, afd.startOffset, afd.declaredLength)
+            } else {
+                retriever.setDataSource(afd.fileDescriptor)
+            }
+            if (retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO) == "yes") {
+                retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE) ?: "video/*"
+            } else {
+                null
+            }
+        } finally {
+            retriever.release()
+        }
+    }
+} catch (_: Exception) {
+    // Corrupt/unreadable media, an unsupported codec, or an unresolvable URI: treat as "not a
+    // video" so the caller falls through to marking the artwork invalid.
+    null
+}
+
+/**
+ * Extracts a still poster frame from the video at [uri], scaled to roughly [width] x [height] when
+ * both are positive (and the platform supports scaled extraction). Used to give video artwork a
+ * thumbnail on surfaces that can't play it (DocumentsUI, widgets, notifications). Returns null if
+ * the URI isn't a readable video.
+ */
+fun ContentResolver.videoFrame(uri: Uri, width: Int = 0, height: Int = 0): Bitmap? {
+    val retriever = MediaMetadataRetriever()
+    return try {
+        val opened = openAssetFileDescriptor(uri, "r")?.use { afd ->
+            if (afd.declaredLength >= 0) {
+                retriever.setDataSource(afd.fileDescriptor, afd.startOffset, afd.declaredLength)
+            } else {
+                retriever.setDataSource(afd.fileDescriptor)
+            }
+            true
+        } ?: false
+        if (!opened) {
+            null
+        } else if (width > 0 && height > 0 &&
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            retriever.getScaledFrameAtTime(-1, MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                    width, height)
+        } else {
+            retriever.frameAtTime
+        }
+    } catch (_: Exception) {
+        null
+    } finally {
+        retriever.release()
     }
 }
 

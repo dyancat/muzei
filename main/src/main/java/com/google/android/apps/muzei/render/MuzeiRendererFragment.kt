@@ -205,6 +205,9 @@ class MuzeiRendererFragment : Fragment(), RenderController.Callbacks, MuzeiBlurR
         }
 
         override fun onDetachedFromWindow() {
+            // Free any video codec up-front on the main thread: the queued GL-thread destroy below
+            // can be dropped if the GL thread exits first, which would leak the ExoPlayer/codec.
+            renderer.releaseVideoPlayers()
             queueEventOnGlThread { renderer.destroy() }
             super.onDetachedFromWindow()
         }

@@ -61,6 +61,7 @@ ksp = "2.3.7"
 # Other
 coil = "3.5.0"
 material = "1.14.0"
+media3 = "1.8.0"
 okhttp = "5.4.0"
 okhttpCoroutines = "1.0"
 retrofit = "3.0.0"
@@ -136,7 +137,10 @@ kotlin = { group = "org.jetbrains.kotlin", name = "kotlin-gradle-plugin", versio
 coil-compose = { group = "io.coil-kt.coil3", name = "coil-compose", version.ref = "coil" }
 coil-runtime = { group = "io.coil-kt.coil3", name = "coil", version.ref = "coil" }
 coil-okhttp = { group = "io.coil-kt.coil3", name = "coil-network-okhttp", version.ref = "coil" }
+coil-video = { group = "io.coil-kt.coil3", name = "coil-video", version.ref = "coil" }
 material = { group = "com.google.android.material", name = "material", version.ref = "material" }
+media3-exoplayer = { group = "androidx.media3", name = "media3-exoplayer", version.ref = "media3" }
+media3-common = { group = "androidx.media3", name = "media3-common", version.ref = "media3" }
 okhttp-core = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
 okhttp-coroutines = { group = "ru.gildor.coroutines", name = "kotlin-coroutines-okhttp", version.ref = "okhttpCoroutines" }
 retrofit-core = { group = "com.squareup.retrofit2", name = "retrofit", version.ref = "retrofit" }

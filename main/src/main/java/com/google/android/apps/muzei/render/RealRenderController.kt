@@ -36,6 +36,13 @@ class RealRenderController(
      * use [MuzeiContract.Artwork.CONTENT_URI].
      */
     private var currentArtworkUri = MuzeiContract.Artwork.CONTENT_URI
+    /**
+     * The current artwork's media MIME type (see [com.google.android.apps.muzei.room.Artwork.mimeType]).
+     * A video MIME type makes [openDownloadedCurrentArtwork] hand the renderer a [RenderSource.Video]
+     * to play rather than a still image to decode. Null (e.g. Direct Boot or legacy rows) is treated
+     * as an image.
+     */
+    private var currentArtworkMimeType: String? = null
 
     override fun onCreate(owner: LifecycleOwner) {
         super.onCreate(owner)
@@ -53,10 +60,15 @@ class RealRenderController(
                 .distinctUntilChanged()
                 .collectIn(owner) { artwork ->
             currentArtworkUri = artwork.contentUri
+            currentArtworkMimeType = artwork.mimeType
             reloadCurrentArtwork()
         }
     }
 
-    override suspend fun openDownloadedCurrentArtwork() =
-            ContentUriImageLoader(context.contentResolver, currentArtworkUri)
+    override suspend fun openDownloadedCurrentArtwork(): RenderSource =
+            if (currentArtworkMimeType?.startsWith("video/") == true) {
+                RenderSource.Video(currentArtworkUri)
+            } else {
+                RenderSource.Image(ContentUriImageLoader(context.contentResolver, currentArtworkUri))
+            }
 }

@@ -37,6 +37,7 @@ import androidx.savedstate.savedState
 import com.google.android.apps.muzei.ArtDetailOpen
 import com.google.android.apps.muzei.ArtworkInfoRedirectActivity
 import com.google.android.apps.muzei.render.ContentUriImageLoader
+import com.google.android.apps.muzei.render.videoFrame
 import com.google.android.apps.muzei.room.MuzeiDatabase
 import com.google.android.apps.muzei.room.contentUri
 import com.google.android.apps.muzei.room.getCommands
@@ -135,8 +136,14 @@ class NewWallpaperNotificationReceiver : BroadcastReceiver() {
             val largeIconHeight = context.resources
                     .getDimensionPixelSize(android.R.dimen.notification_large_icon_height)
             val imageLoader = ContentUriImageLoader(contentResolver, artwork.contentUri)
-            val largeIcon = withContext(Dispatchers.IO) { imageLoader.decode(largeIconHeight) } ?: return
-            val bigPicture = withContext(Dispatchers.IO) { imageLoader.decode(400) } ?: return
+            // Video artwork can't be decoded as a still; fall back to a poster frame.
+            val largeIcon = withContext(Dispatchers.IO) {
+                imageLoader.decode(largeIconHeight)
+                        ?: contentResolver.videoFrame(artwork.contentUri, largeIconHeight, largeIconHeight)
+            } ?: return
+            val bigPicture = withContext(Dispatchers.IO) {
+                imageLoader.decode(400) ?: contentResolver.videoFrame(artwork.contentUri, 400, 400)
+            } ?: return
 
             createNotificationChannel(context)
 

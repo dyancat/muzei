@@ -42,10 +42,10 @@ abstract class RenderController(
             field = value
             if (value) {
                 callbacks.queueEventOnGlThread {
-                    val loader = queuedImageLoader
-                    if (loader != null) {
-                        queuedImageLoader = null
-                        renderer.setAndConsumeImageLoader(loader)
+                    val source = queuedSource
+                    if (source != null) {
+                        queuedSource = null
+                        renderer.setAndConsumeSource(source)
                     }
                 }
                 callbacks.requestRender()
@@ -70,7 +70,7 @@ abstract class RenderController(
         }
     private lateinit var coroutineScope: CoroutineScope
     private var destroyed = false
-    private var queuedImageLoader: ImageLoader? = null
+    private var queuedSource: RenderSource? = null
     private val sharedPreferenceChangeListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (onLockScreen) {
             when (key) {
@@ -112,13 +112,22 @@ abstract class RenderController(
     }
 
     override fun onDestroy(owner: LifecycleOwner) {
-        queuedImageLoader = null
+        queuedSource = null
         Prefs.getSharedPreferences(context)
                 .unregisterOnSharedPreferenceChangeListener(sharedPreferenceChangeListener)
         destroyed = true
     }
 
-    protected abstract suspend fun openDownloadedCurrentArtwork(): ImageLoader
+    /**
+     * Pauses or resumes video playback on the GL thread (a no-op for image artwork). The wallpaper
+     * calls this as its surface hides/shows so a video freezes (and stops decoding/redrawing) while
+     * off-screen or on AOD.
+     */
+    fun setVideoPlaybackPaused(paused: Boolean) {
+        callbacks.queueEventOnGlThread { renderer.setVideoPaused(paused) }
+    }
+
+    protected abstract suspend fun openDownloadedCurrentArtwork(): RenderSource
 
     fun reloadCurrentArtwork(reloadType: ReloadType = ReloadWhenVisible) {
         if (destroyed) {
@@ -126,13 +135,13 @@ abstract class RenderController(
             return
         }
         coroutineScope.launch(Dispatchers.Main) {
-            val imageLoader = openDownloadedCurrentArtwork()
+            val source = openDownloadedCurrentArtwork()
 
             callbacks.queueEventOnGlThread {
                 if (visible || reloadType != ReloadWhenVisible) {
-                    renderer.setAndConsumeImageLoader(imageLoader, reloadType == ReloadImmediate || !visible)
+                    renderer.setAndConsumeSource(source, reloadType == ReloadImmediate || !visible)
                 } else {
-                    queuedImageLoader = imageLoader
+                    queuedSource = source
                 }
             }
         }

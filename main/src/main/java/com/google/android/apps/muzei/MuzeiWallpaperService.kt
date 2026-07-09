@@ -391,8 +391,18 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
             super<GLEngine>.onDestroy()
         }
 
+        /**
+         * Pause video playback whenever it isn't actually on screen — the surface is hidden (screen
+         * off / AOD / another app) or the lock screen is showing — and resume it only when the home
+         * wallpaper is visible. Images are unaffected (a no-op for them).
+         */
+        private fun updateVideoPlaybackState() {
+            renderController.setVideoPlaybackPaused(!surfaceVisible || lockScreenVisible)
+        }
+
         fun lockScreenVisibleChanged(isLockScreenVisible: Boolean) {
             lockScreenVisible = isLockScreenVisible
+            updateVideoPlaybackState()
             if (isLockScreenVisible) {
                 // The keyguard (not the launcher) hosts the wallpaper now, so notifyColorsChanged()
                 // here won't cause the launcher offset jump — flush any deferred colours update.
@@ -418,6 +428,9 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
             renderController.visible = true
 
             surfaceVisible = visible
+            // Pause video while it isn't actually on screen (hidden surface or lock screen) so it
+            // stops decoding and requesting frames; resume when the home wallpaper is shown.
+            updateVideoPlaybackState()
             if (!visible) {
                 // Hidden now (screen off / another app) — safe to publish a deferred update.
                 flushPendingColors()

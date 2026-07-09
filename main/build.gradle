@@ -122,6 +122,7 @@ dependencies {
     implementation libs.coil.compose
     implementation libs.coil.runtime
     implementation libs.coil.okhttp
+    implementation libs.coil.video
     implementation libs.wearable.playservices
     implementation libs.tasker
     implementation libs.subsampling
@@ -140,6 +141,8 @@ dependencies {
     implementation libs.lifecycle.viewmodel
     implementation libs.recyclerView
     implementation libs.material
+    implementation libs.media3.exoplayer
+    implementation libs.media3.common
     implementation libs.browser
     implementation libs.exifInterface
     implementation libs.lifecycle.livedata

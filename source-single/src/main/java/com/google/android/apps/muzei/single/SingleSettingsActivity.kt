@@ -19,7 +19,7 @@ package com.google.android.apps.muzei.single
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.result.contract.ActivityResultContracts.GetContent
+import androidx.activity.result.contract.ActivityResultContracts.OpenDocument
 import androidx.activity.result.launch
 import androidx.activity.result.registerForActivityResult
 import androidx.lifecycle.lifecycleScope
@@ -29,11 +29,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * Settings Activity which allows users to select a new photo
+ * Settings Activity which allows users to select a new photo or video
  */
 class SingleSettingsActivity : ComponentActivity() {
 
-    private val getImage = registerForActivityResult(GetContent(), "image/*") { uri ->
+    // Accept both images and videos. OpenDocument (unlike GetContent) can filter on multiple MIME
+    // types at once and returns a URI we can read immediately to copy the artwork locally.
+    private val getImage = registerForActivityResult(
+            OpenDocument(), arrayOf("image/*", "video/*")) { uri ->
         if (uri != null) {
             lifecycleScope.launch {
                 withContext(NonCancellable) {
