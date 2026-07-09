@@ -757,12 +757,17 @@ class MuzeiBlurRenderer(
             darkness = decoded.darkness
 
             val targetHeight = if (currentHeight > 0) currentHeight else decoded.height
-            // Sharp capture at ~screen height (no point exceeding the video's own resolution),
-            // capped to a single texture.
+            // Sharp capture at ~screen height (no point exceeding the video's own resolution).
             var sharpHeight = min(decoded.height, targetHeight).coerceAtLeast(2)
             var sharpWidth = max(2, (sharpHeight * bitmapAspectRatio).toInt())
-            if (sharpWidth > MAX_BLUR_SOURCE_DIM || sharpHeight > MAX_BLUR_SOURCE_DIM) {
-                val downscale = MAX_BLUR_SOURCE_DIM.toFloat() / max(sharpWidth, sharpHeight)
+            // Only downscale if we'd exceed the GPU's max texture size (typically >= 4096). Using the
+            // small blur-source cap here would shrink the sharp capture well below screen resolution
+            // on high-res (e.g. QHD+) displays and make the video look soft.
+            val maxTextureSize = IntArray(1)
+            GLES20.glGetIntegerv(GLES20.GL_MAX_TEXTURE_SIZE, maxTextureSize, 0)
+            val cap = maxTextureSize[0]
+            if (cap > 0 && (sharpWidth > cap || sharpHeight > cap)) {
+                val downscale = cap.toFloat() / max(sharpWidth, sharpHeight)
                 sharpWidth = max(2, (sharpWidth * downscale).toInt())
                 sharpHeight = max(2, (sharpHeight * downscale).toInt())
             }

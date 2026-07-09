@@ -78,6 +78,36 @@ internal class GLVideo(
                 "  gl_FragColor = texture2D(uTexture, vTexCoords);" +
                 "}"
 
+        // Draws the external video texture straight to the bound framebuffer (the screen) through
+        // the MVP, applying alpha and desaturation — the sharp path. This avoids the extra
+        // external->FBO->screen resample the blur path needs, so an unblurred video is a single
+        // upscale (as sharp as a normal video player) rather than two bilinear passes.
+        private const val DIRECT_VERTEX_SHADER = "" +
+                "uniform mat4 uMVPMatrix;" +
+                "uniform mat4 uSTMatrix;" +
+                "attribute vec4 aPosition;" +
+                "attribute vec4 aTexCoords;" +
+                "varying vec2 vTexCoords;" +
+                "void main(){" +
+                "  gl_Position = uMVPMatrix * aPosition;" +
+                "  vTexCoords = (uSTMatrix * aTexCoords).xy;" +
+                "}"
+
+        private const val DIRECT_FRAGMENT_SHADER = "" +
+                "#extension GL_OES_EGL_image_external : require\n" +
+                "precision mediump float;" +
+                "uniform samplerExternalOES uTexture;" +
+                "uniform float uAlpha;" +
+                "uniform float uGrey;" +
+                "varying vec2 vTexCoords;" +
+                "void main(){" +
+                "  vec4 c = texture2D(uTexture, vTexCoords);" +
+                "  float lum = dot(c.rgb, vec3(0.299, 0.587, 0.114));" +
+                "  c.rgb = mix(c.rgb, vec3(lum), clamp(uGrey, 0.0, 1.0));" +
+                "  c.a = uAlpha;" +
+                "  gl_FragColor = c;" +
+                "}"
+
         // Full-screen quad (NDC), TL, BL, BR, TL, BR, TR.
         private val QUAD_POSITIONS = floatArrayOf(
                 -1f, 1f, 0f,   -1f, -1f, 0f,   1f, -1f, 0f,
@@ -89,6 +119,11 @@ internal class GLVideo(
         private val OES_TEXCOORDS = floatArrayOf(
                 0f, 0f, 0f, 1f,   0f, 1f, 0f, 1f,   1f, 1f, 0f, 1f,
                 0f, 0f, 0f, 1f,   1f, 1f, 0f, 1f,   1f, 0f, 0f, 1f)
+        // Texcoords for the direct-to-screen draw. Same content as OES_TEXCOORDS but without the FBO
+        // vertical flip (one fewer render target), so the frame is upright drawn straight to screen.
+        private val DIRECT_TEXCOORDS = floatArrayOf(
+                0f, 1f, 0f, 1f,   0f, 0f, 0f, 1f,   1f, 0f, 0f, 1f,
+                0f, 1f, 0f, 1f,   1f, 0f, 0f, 1f,   1f, 1f, 0f, 1f)
         private const val VERTICES = 6
 
         private var program = 0
@@ -96,6 +131,15 @@ internal class GLVideo(
         private var texCoordsHandle = 0
         private var textureHandle = 0
         private var stMatrixHandle = 0
+
+        private var directProgram = 0
+        private var directPositionHandle = 0
+        private var directTexCoordsHandle = 0
+        private var directTextureHandle = 0
+        private var directStMatrixHandle = 0
+        private var directMvpHandle = 0
+        private var directAlphaHandle = 0
+        private var directGreyHandle = 0
 
         private var screenWidth = 0
         private var screenHeight = 0
@@ -108,6 +152,17 @@ internal class GLVideo(
             texCoordsHandle = GLES20.glGetAttribLocation(program, "aTexCoords")
             textureHandle = GLES20.glGetUniformLocation(program, "uTexture")
             stMatrixHandle = GLES20.glGetUniformLocation(program, "uSTMatrix")
+
+            directProgram = GLUtil.createAndLinkProgram(
+                    GLUtil.loadShader(GLES20.GL_VERTEX_SHADER, DIRECT_VERTEX_SHADER),
+                    GLUtil.loadShader(GLES20.GL_FRAGMENT_SHADER, DIRECT_FRAGMENT_SHADER), null)
+            directPositionHandle = GLES20.glGetAttribLocation(directProgram, "aPosition")
+            directTexCoordsHandle = GLES20.glGetAttribLocation(directProgram, "aTexCoords")
+            directTextureHandle = GLES20.glGetUniformLocation(directProgram, "uTexture")
+            directStMatrixHandle = GLES20.glGetUniformLocation(directProgram, "uSTMatrix")
+            directMvpHandle = GLES20.glGetUniformLocation(directProgram, "uMVPMatrix")
+            directAlphaHandle = GLES20.glGetUniformLocation(directProgram, "uAlpha")
+            directGreyHandle = GLES20.glGetUniformLocation(directProgram, "uGrey")
         }
 
         /** Records the surface size so a capture pass can restore the viewport (see [GLBlur]). */
@@ -133,6 +188,7 @@ internal class GLVideo(
     private val blur = GLBlur()
     private val quadPositions = GLUtil.asFloatBuffer(QUAD_POSITIONS)
     private val texCoords = GLUtil.asFloatBuffer(OES_TEXCOORDS)
+    private val directTexCoords = GLUtil.asFloatBuffer(DIRECT_TEXCOORDS)
     private var released = false
 
     // ExoPlayer (main thread).
@@ -216,8 +272,14 @@ internal class GLVideo(
         }
         surfaceTexture.updateTexImage()
         surfaceTexture.getTransformMatrix(stMatrix)
+    }
 
-        // Capture external -> sharp FBO.
+    /**
+     * Captures the current external frame into [sharpTexture] (a 2D FBO) so the blur passes can read
+     * it, and marks the cached blur stale. Only needed when the frame will actually be blurred — the
+     * sharp path draws the external texture straight to screen (see [draw]) and skips this.
+     */
+    private fun captureToFbo() {
         GLES20.glDisable(GLES20.GL_BLEND)
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, sharpFbo[0])
         GLES20.glViewport(0, 0, sharpWidth, sharpHeight)
@@ -245,11 +307,36 @@ internal class GLVideo(
         blur.invalidate()
     }
 
+    /** Draws the external video texture straight to the bound framebuffer (the sharp path). */
+    private fun drawExternalDirect(mvpMatrix: FloatArray, alpha: Float, grey: Float) {
+        GLES20.glUseProgram(directProgram)
+        GLES20.glEnableVertexAttribArray(directPositionHandle)
+        GLES20.glVertexAttribPointer(directPositionHandle, 3, GLES20.GL_FLOAT, false, 0,
+                quadPositions)
+        GLES20.glEnableVertexAttribArray(directTexCoordsHandle)
+        GLES20.glVertexAttribPointer(directTexCoordsHandle, 4, GLES20.GL_FLOAT, false, 0,
+                directTexCoords)
+        GLES20.glUniformMatrix4fv(directMvpHandle, 1, false, mvpMatrix, 0)
+        GLES20.glUniformMatrix4fv(directStMatrixHandle, 1, false, stMatrix, 0)
+        GLES20.glUniform1f(directAlphaHandle, alpha)
+        GLES20.glUniform1f(directGreyHandle, grey)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glUniform1i(directTextureHandle, 0)
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, externalTexture)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, VERTICES)
+        GLES20.glDisableVertexAttribArray(directPositionHandle)
+        GLES20.glDisableVertexAttribArray(directTexCoordsHandle)
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, 0)
+    }
+
     /**
-     * Draws the (already captured) frame through [mvpMatrix], compositing sharp and blurred layers
-     * exactly like the image path: [blurWeight] 0 -> sharp only, 1 -> blur fully covers; [grey]
-     * desaturates; [blurRadiusPx] is the current blur radius. Alphas are recomposed so a crossfade
+     * Draws the current frame through [mvpMatrix], compositing sharp and blurred layers like the
+     * image path: [blurWeight] 0 -> sharp only, 1 -> blur fully covers; [grey] desaturates;
+     * [blurRadiusPx] is the current blur radius. Alphas are recomposed so a crossfade
      * ([globalAlpha] < 1) blends the single lerp(sharp, blurred) result, not two stacked layers.
+     *
+     * When fully sharp the external texture is drawn straight to screen (one upscale, as crisp as a
+     * player); only when blurring do we capture into the FBO the blur reads from.
      */
     fun draw(mvpMatrix: FloatArray, globalAlpha: Float, blurWeight: Float, blurRadiusPx: Float,
              grey: Float) {
@@ -257,9 +344,11 @@ internal class GLVideo(
             return
         }
         if (blurWeight <= 0f) {
-            blur.drawTexture(mvpMatrix, sharpTexture[0], globalAlpha, grey)
+            drawExternalDirect(mvpMatrix, globalAlpha, grey)
             return
         }
+        // Blurring: capture the frame so GLBlur can read it, then composite sharp + blurred.
+        captureToFbo()
         if (blurWeight < 1f) {
             val sharpAlpha = globalAlpha * (1f - blurWeight) / (1f - globalAlpha * blurWeight)
             blur.drawTexture(mvpMatrix, sharpTexture[0], sharpAlpha, grey)
