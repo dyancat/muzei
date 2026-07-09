@@ -27,14 +27,19 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -43,6 +48,7 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.rememberTopAppBarState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -57,6 +63,7 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
@@ -108,9 +115,12 @@ fun BrowseProvider(
     val coroutineScope = rememberCoroutineScope()
     var isRefreshing by remember { mutableStateOf(false) }
     val artworkList by viewModel.artwork.collectAsState(listOf())
+    val sortOption by viewModel.sortOption.collectAsState()
     BrowseProviderScreen(
         label = label,
         onUp = onUp,
+        sortOption = sortOption,
+        onSortSelected = viewModel::setSortOption,
         onRefresh = {
             coroutineScope.launch {
                 isRefreshing = true
@@ -199,6 +209,8 @@ private suspend fun onActionClicked(
 fun BrowseProviderScreen(
     label: String? = null,
     onUp: () -> Unit = {},
+    sortOption: BrowseSortOption = BrowseSortOption.DEFAULT,
+    onSortSelected: (BrowseSortOption) -> Unit = {},
     onRefresh: () -> Unit = {},
     isRefreshing: Boolean = false,
     artworkList: List<Artwork> = emptyList(),
@@ -207,6 +219,12 @@ fun BrowseProviderScreen(
     onActionClick: suspend (Artwork, String) -> Unit = { _, _ -> },
 ) {
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior(rememberTopAppBarState())
+    val gridState = rememberLazyGridState()
+    // Jump back to the top whenever the sort changes so the user sees the newly-first items
+    // rather than staying at the old scroll offset within a now-reordered list.
+    LaunchedEffect(sortOption) {
+        gridState.scrollToItem(0)
+    }
 
     Scaffold(
         modifier = Modifier
@@ -248,6 +266,54 @@ fun BrowseProviderScreen(
                                 onRefresh()
                             }
                         )
+                        HorizontalDivider()
+                        Text(
+                            text = stringResource(R.string.browse_sort_by),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                        )
+                        BrowseSortCriterion.entries.forEach { criterion ->
+                            val selected = criterion == sortOption.criterion
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        text = stringResource(criterion.labelRes),
+                                        fontWeight = if (selected) FontWeight.Bold else null,
+                                    )
+                                },
+                                trailingIcon = if (selected) {
+                                    {
+                                        Icon(
+                                            imageVector = if (sortOption.descending) {
+                                                Icons.Default.ArrowDownward
+                                            } else {
+                                                Icons.Default.ArrowUpward
+                                            },
+                                            contentDescription = stringResource(
+                                                if (sortOption.descending) {
+                                                    R.string.browse_sort_descending
+                                                } else {
+                                                    R.string.browse_sort_ascending
+                                                }
+                                            ),
+                                        )
+                                    }
+                                } else null,
+                                onClick = {
+                                    expanded = false
+                                    onSortSelected(
+                                        if (selected) {
+                                            // Tapping the active criterion flips the direction
+                                            sortOption.copy(descending = !sortOption.descending)
+                                        } else {
+                                            // Switching criterion keeps the current direction
+                                            sortOption.copy(criterion = criterion)
+                                        }
+                                    )
+                                }
+                            )
+                        }
                     }
                 },
                 scrollBehavior = scrollBehavior,
@@ -262,7 +328,8 @@ fun BrowseProviderScreen(
                 .padding(paddingValues)
         ) {
             LazyVerticalGrid(
-                columns = GridCells.Adaptive(minSize = 160.dp)
+                columns = GridCells.Adaptive(minSize = 160.dp),
+                state = gridState,
             ) {
                 items(
                     items = artworkList,
@@ -314,6 +381,13 @@ fun BrowseProviderScreen(
         }
     }
 }
+
+private val BrowseSortCriterion.labelRes: Int
+    get() = when (this) {
+        BrowseSortCriterion.NAME -> R.string.browse_sort_name
+        BrowseSortCriterion.DATE -> R.string.browse_sort_date
+        BrowseSortCriterion.SIZE -> R.string.browse_sort_size
+    }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalCoilApi::class)
 @Preview

@@ -33,8 +33,10 @@ import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flatMapLatest
@@ -77,18 +79,29 @@ class BrowseProviderViewModel(
             // the main thread so opening the screen doesn't block on it.
             refreshJob = launch(Dispatchers.IO) {
                 try {
-                    val list = mutableListOf<Artwork>()
+                    val list = mutableListOf<BrowseArtwork>()
                     contentProviderClient.query(args.contentUri)?.use { data ->
                         while(data.moveToNext() && isActive) {
                             val providerArtwork =
                                 com.google.android.apps.muzei.api.provider.Artwork.fromCursor(data)
-                            list.add(Artwork(ContentUris.withAppendedId(args.contentUri,
+                            val artwork = Artwork(ContentUris.withAppendedId(args.contentUri,
                                 providerArtwork.id)).apply {
                                 title = providerArtwork.title
                                 byline = providerArtwork.byline
                                 attribution = providerArtwork.attribution
                                 providerAuthority = authority
-                            })
+                            }
+                            // Read the name/size/last-modified the grid can be sorted by, falling
+                            // back to the artwork's own dateAdded only when the file has no
+                            // last-modified time of its own.
+                            val attrs = readSortAttributes(context, providerArtwork)
+                            list.add(BrowseArtwork(
+                                artwork = artwork,
+                                name = attrs.name,
+                                lastModified = attrs.lastModified
+                                    ?: runCatching { providerArtwork.dateAdded.time }.getOrNull(),
+                                size = attrs.size,
+                            ))
                         }
                     }
                     send(list)
@@ -115,12 +128,29 @@ class BrowseProviderViewModel(
         }
     }
 
-    val artwork = client.flatMapLatest { client ->
+    private val browseArtwork = client.flatMapLatest { client ->
         if (client != null) {
             getProviderArtwork(client) }
         else {
             emptyFlow()
         }
+    }.shareIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), 1)
+
+    private val _sortOption = MutableStateFlow(
+        BrowseSortOption.fromPreferences(application))
+
+    /**
+     * The current browse-grid sort option. Persisted across sessions.
+     */
+    val sortOption = _sortOption
+
+    fun setSortOption(option: BrowseSortOption) {
+        getApplication<Application>().browseSharedPreferences().let { option.writeTo(it) }
+        _sortOption.value = option
+    }
+
+    val artwork = combine(browseArtwork, _sortOption) { artwork, option ->
+        option.sort(artwork).map { it.artwork }
     }.shareIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), 1)
 
     companion object {
