@@ -91,14 +91,16 @@ class BrowseProviderViewModel(
                                 attribution = providerArtwork.attribution
                                 providerAuthority = authority
                             }
-                            // Read the name/size the grid can be sorted by. The date comes from
-                            // the artwork's own dateAdded.
-                            val (name, size) = readSortAttributes(context, providerArtwork)
+                            // Read the name/size/last-modified the grid can be sorted by, falling
+                            // back to the artwork's own dateAdded only when the file has no
+                            // last-modified time of its own.
+                            val attrs = readSortAttributes(context, providerArtwork)
                             list.add(BrowseArtwork(
                                 artwork = artwork,
-                                name = name,
-                                dateAdded = runCatching { providerArtwork.dateAdded.time }.getOrNull(),
-                                size = size,
+                                name = attrs.name,
+                                lastModified = attrs.lastModified
+                                    ?: runCatching { providerArtwork.dateAdded.time }.getOrNull(),
+                                size = attrs.size,
                             ))
                         }
                     }

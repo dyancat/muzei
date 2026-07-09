@@ -19,6 +19,8 @@ package com.google.android.apps.muzei.browse
 import android.content.Context
 import android.content.SharedPreferences
 import android.net.Uri
+import android.provider.DocumentsContract
+import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.util.Log
 import androidx.core.content.edit
@@ -62,7 +64,7 @@ data class BrowseSortOption(
                 }
                 compareBy(nullsLast(order)) { it.name }
             }
-            BrowseSortCriterion.DATE -> compareBy(directionalNullsLast()) { it.dateAdded }
+            BrowseSortCriterion.DATE -> compareBy(directionalNullsLast()) { it.lastModified }
             BrowseSortCriterion.SIZE -> compareBy(directionalNullsLast()) { it.size }
         }
         return artwork.sortedWith(comparator.thenBy { it.artwork.id })
@@ -107,24 +109,34 @@ internal fun Context.browseSharedPreferences(): SharedPreferences =
 data class BrowseArtwork(
     val artwork: Artwork,
     val name: String?,
-    val dateAdded: Long?,
+    val lastModified: Long?,
     val size: Long?,
 )
 
 /**
- * Read the sortable name and size for [providerArtwork] from its underlying URI. Best-effort:
- * any attribute we can't read is left null (and sorts to the end). Safe to call off the main
- * thread. The date comes directly from the artwork's `dateAdded`, so it isn't read here.
+ * The sortable attributes of a single artwork, read from its underlying URI.
+ */
+internal data class SortAttributes(
+    val name: String? = null,
+    val size: Long? = null,
+    val lastModified: Long? = null,
+)
+
+/**
+ * Read the sortable name, size and last-modified time for [providerArtwork] from its underlying
+ * URI. Best-effort: any attribute we can't read is left null (and sorts to the end). Safe to call
+ * off the main thread.
  */
 internal fun readSortAttributes(
     context: Context,
     providerArtwork: ProviderArtwork,
-): Pair<String?, Long?> {
+): SortAttributes {
     val uri = providerArtwork.persistentUri
         ?: providerArtwork.webUri
         ?: providerArtwork.token?.takeUnless { it.isEmpty() }?.toUri()
     var name: String? = null
     var size: Long? = null
+    var lastModified: Long? = null
     if (uri != null) {
         try {
             context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
@@ -133,6 +145,16 @@ internal fun readSortAttributes(
                         ?.let { if (!cursor.isNull(it)) name = cursor.getString(it) }
                     cursor.getColumnIndex(OpenableColumns.SIZE).takeIf { it >= 0 }
                         ?.let { if (!cursor.isNull(it)) size = cursor.getLong(it) }
+                    // SAF document URIs expose last_modified in milliseconds; MediaStore URIs
+                    // expose date_modified in seconds instead, so normalise that to millis.
+                    cursor.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+                        .takeIf { it >= 0 }
+                        ?.let { if (!cursor.isNull(it)) lastModified = cursor.getLong(it) }
+                    if (lastModified == null) {
+                        cursor.getColumnIndex(MediaStore.MediaColumns.DATE_MODIFIED)
+                            .takeIf { it >= 0 }
+                            ?.let { if (!cursor.isNull(it)) lastModified = cursor.getLong(it) * 1000 }
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -145,6 +167,7 @@ internal fun readSortAttributes(
     if (cachedFile?.exists() == true) {
         if (name == null) name = cachedFile.name
         if (size == null) size = cachedFile.length()
+        if (lastModified == null) cachedFile.lastModified().takeIf { it > 0 }?.let { lastModified = it }
     }
-    return name to size
+    return SortAttributes(name, size, lastModified)
 }
