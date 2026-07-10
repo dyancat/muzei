@@ -23,6 +23,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -40,6 +41,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -269,9 +271,14 @@ fun BrowseProviderScreen(
                         HorizontalDivider()
                         Text(
                             text = stringResource(R.string.browse_sort_by),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            // Align the label's left edge with the menu items via their shared
+                            // content padding, with a little more space above than below.
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(MenuDefaults.DropdownMenuItemContentPadding)
+                                .padding(top = 12.dp, bottom = 6.dp),
                         )
                         BrowseSortCriterion.entries.forEach { criterion ->
                             val selected = criterion == sortOption.criterion
@@ -385,7 +392,8 @@ fun BrowseProviderScreen(
 private val BrowseSortCriterion.labelRes: Int
     get() = when (this) {
         BrowseSortCriterion.NAME -> R.string.browse_sort_name
-        BrowseSortCriterion.DATE -> R.string.browse_sort_date
+        BrowseSortCriterion.DATE_ADDED -> R.string.browse_sort_date_added
+        BrowseSortCriterion.DATE_MODIFIED -> R.string.browse_sort_date_modified
         BrowseSortCriterion.SIZE -> R.string.browse_sort_size
     }
 

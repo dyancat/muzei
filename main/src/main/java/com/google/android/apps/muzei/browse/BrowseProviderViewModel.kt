@@ -91,15 +91,14 @@ class BrowseProviderViewModel(
                                 attribution = providerArtwork.attribution
                                 providerAuthority = authority
                             }
-                            // Read the name/size/last-modified the grid can be sorted by, falling
-                            // back to the artwork's own dateAdded only when the file has no
-                            // last-modified time of its own.
+                            // Read the name/size/file-modified time the grid can be sorted by;
+                            // the added date is the artwork's own dateAdded.
                             val attrs = readSortAttributes(context, providerArtwork)
                             list.add(BrowseArtwork(
                                 artwork = artwork,
                                 name = attrs.name,
-                                lastModified = attrs.lastModified
-                                    ?: runCatching { providerArtwork.dateAdded.time }.getOrNull(),
+                                dateAdded = runCatching { providerArtwork.dateAdded.time }.getOrNull(),
+                                dateModified = attrs.dateModified,
                                 size = attrs.size,
                             ))
                         }
