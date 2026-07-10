@@ -22,8 +22,10 @@ import com.google.android.apps.muzei.api.MuzeiContract
 import com.google.android.apps.muzei.room.MuzeiDatabase
 import com.google.android.apps.muzei.room.contentUri
 import com.google.android.apps.muzei.util.collectIn
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.withContext
 
 class RealRenderController(
         context: Context,
@@ -36,13 +38,6 @@ class RealRenderController(
      * use [MuzeiContract.Artwork.CONTENT_URI].
      */
     private var currentArtworkUri = MuzeiContract.Artwork.CONTENT_URI
-    /**
-     * The current artwork's media MIME type (see [com.google.android.apps.muzei.room.Artwork.mimeType]).
-     * A video MIME type makes [openDownloadedCurrentArtwork] hand the renderer a [RenderSource.Video]
-     * to play rather than a still image to decode. Null (e.g. Direct Boot or legacy rows) is treated
-     * as an image.
-     */
-    private var currentArtworkMimeType: String? = null
 
     override fun onCreate(owner: LifecycleOwner) {
         super.onCreate(owner)
@@ -60,15 +55,22 @@ class RealRenderController(
                 .distinctUntilChanged()
                 .collectIn(owner) { artwork ->
             currentArtworkUri = artwork.contentUri
-            currentArtworkMimeType = artwork.mimeType
             reloadCurrentArtwork()
         }
     }
 
-    override suspend fun openDownloadedCurrentArtwork(): RenderSource =
-            if (currentArtworkMimeType?.startsWith("video/") == true) {
-                RenderSource.Video(currentArtworkUri)
-            } else {
-                RenderSource.Image(ContentUriImageLoader(context.contentResolver, currentArtworkUri))
-            }
+    override suspend fun openDownloadedCurrentArtwork(): RenderSource {
+        // The media type isn't stored, so probe the artwork's container each reload to tell video
+        // from a still image. videoMimeType opens the file and runs MediaMetadataRetriever, so keep
+        // it off the main thread.
+        val uri = currentArtworkUri
+        val isVideo = withContext(Dispatchers.IO) {
+            context.contentResolver.videoMimeType(uri) != null
+        }
+        return if (isVideo) {
+            RenderSource.Video(uri)
+        } else {
+            RenderSource.Image(ContentUriImageLoader(context.contentResolver, uri))
+        }
+    }
 }

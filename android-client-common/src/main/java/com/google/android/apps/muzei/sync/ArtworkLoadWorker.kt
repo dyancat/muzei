@@ -288,7 +288,6 @@ class ArtworkLoadWorker(
                     title = providerArtwork.title
                     byline = providerArtwork.byline
                     attribution = providerArtwork.attribution
-                    mimeType = resolvedMimeType
                 }
             } else {
                 if (BuildConfig.DEBUG) {

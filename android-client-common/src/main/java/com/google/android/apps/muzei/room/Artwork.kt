@@ -56,13 +56,6 @@ data class Artwork(
     @ColumnInfo(name = "date_added")
     var dateAdded = Date()
 
-    /**
-     * The artwork's media MIME type (e.g. `image/jpeg`, `video/mp4`), or null for legacy rows
-     * where it wasn't recorded. A video MIME type tells the renderer to play this artwork as
-     * video rather than decode it as a still image.
-     */
-    var mimeType: String? = null
-
     companion object {
 
         fun getContentUri(id: Long): Uri {
