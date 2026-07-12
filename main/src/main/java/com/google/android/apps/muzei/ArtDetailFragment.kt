@@ -324,9 +324,17 @@ class ArtDetailFragment : Fragment(R.layout.art_detail_fragment) {
         }
 
         ArtDetailViewport.getChanges().collectIn(viewLifecycleOwner) { isFromUser ->
-            if (!isFromUser) {
+            val viewport = ArtDetailViewport.getViewport(currentViewportId)
+            // The renderer uses an empty rect as a "recompute a default" sentinel (see
+            // MuzeiBlurRenderer.setIsBlurred / onSurfaceChanged). It self-heals to a real viewport a
+            // frame later, but that self-heal is gated on the current picture set having a bitmap —
+            // which a still-loading artwork (notably a video, whose set has no frame until playback
+            // starts) doesn't yet have. Applying the empty rect here would collapse the pan/zoom into
+            // the top-left corner and stick until the artwork loads, so skip it and wait for the real
+            // viewport to be emitted.
+            if (!isFromUser && !viewport.isEmpty) {
                 guardViewportChangeListener = true
-                binding.panScaleProxy.setViewport(ArtDetailViewport.getViewport(currentViewportId))
+                binding.panScaleProxy.setViewport(viewport)
                 guardViewportChangeListener = false
             }
         }
