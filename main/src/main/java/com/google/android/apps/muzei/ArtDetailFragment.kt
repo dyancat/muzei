@@ -57,7 +57,6 @@ import com.google.android.apps.muzei.notifications.NewWallpaperNotificationRecei
 import com.google.android.apps.muzei.render.ArtworkSizeStateFlow
 import com.google.android.apps.muzei.render.ContentUriImageLoader
 import com.google.android.apps.muzei.render.SwitchingPhotosDone
-import com.google.android.apps.muzei.render.SwitchingPhotosInProgress
 import com.google.android.apps.muzei.render.SwitchingPhotosStateFlow
 import com.google.android.apps.muzei.room.MuzeiDatabase
 import com.google.android.apps.muzei.room.getCommands
@@ -133,7 +132,6 @@ class ArtDetailFragment : Fragment(R.layout.art_detail_fragment) {
     private var wallpaperAspectRatio: Float = 0f
     private var artworkAspectRatio: Float = 0f
     private var guardViewportChangeListener: Boolean = false
-    private var deferResetViewport: Boolean = false
 
     private val showBackgroundImage by lazy {
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.N
@@ -336,10 +334,6 @@ class ArtDetailFragment : Fragment(R.layout.art_detail_fragment) {
         SwitchingPhotosStateFlow.filterNotNull().collectIn(viewLifecycleOwner) { switchingPhotos ->
             currentViewportId = switchingPhotos.viewportId
             binding.panScaleProxy.panScaleEnabled = switchingPhotos is SwitchingPhotosDone
-            // Process deferred artwork size change when done switching
-            if (switchingPhotos is SwitchingPhotosDone && deferResetViewport) {
-                resetProxyViewport()
-            }
         }
 
         viewModel.currentProvider.collectIn(viewLifecycleOwner) { provider ->
@@ -469,13 +463,11 @@ class ArtDetailFragment : Fragment(R.layout.art_detail_fragment) {
         if (wallpaperAspectRatio == 0f || artworkAspectRatio == 0f) {
             return
         }
-
-        deferResetViewport = false
-        if (SwitchingPhotosStateFlow.value is SwitchingPhotosInProgress) {
-            deferResetViewport = true
-            return
-        }
-
+        // Apply the incoming artwork's aspect immediately, even mid-switch. SwitchingPhotosInProgress
+        // fires before this (flipping currentViewportId to the incoming set), so this updates the
+        // incoming viewport rather than the outgoing one — the new artwork then draws at the correct
+        // aspect from the first crossfade frame instead of being stretched into the previous
+        // artwork's aspect until the switch completes.
         binding.panScaleProxy.relativeAspectRatio = artworkAspectRatio / wallpaperAspectRatio
     }
 
