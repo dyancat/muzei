@@ -17,6 +17,7 @@
 package com.google.android.apps.muzei.render
 
 import android.content.Context
+import androidx.core.os.UserManagerCompat
 import androidx.lifecycle.LifecycleOwner
 import com.google.android.apps.muzei.api.MuzeiContract
 import com.google.android.apps.muzei.room.MuzeiDatabase
@@ -41,7 +42,14 @@ class RealRenderController(
 
     override fun onCreate(owner: LifecycleOwner) {
         super.onCreate(owner)
-        reloadCurrentArtwork()
+        // Direct Boot only: the artwork DB isn't readable while the user is locked, so fall back to
+        // the generic CONTENT_URI (which reads the downloaded file directly). Once unlocked, onStart's
+        // artwork flow loads the specific per-artwork URI; doing both loads the same artwork under two
+        // different URIs, and since the video dedup keys on the raw URI it doesn't skip the second —
+        // producing a video-to-identical-video crossfade. Skip the redundant load when unlocked.
+        if (!UserManagerCompat.isUserUnlocked(context)) {
+            reloadCurrentArtwork()
+        }
     }
 
     override fun onStart(owner: LifecycleOwner) {
