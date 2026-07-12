@@ -501,12 +501,12 @@ class MuzeiBlurRenderer(
             imageLoader.decode(scaledWidth, scaledHeight)
         }
         val blurSource: Bitmap? = if (tempBitmap != null && tempBitmap.width != 0 && tempBitmap.height != 0) {
-            // scale() returns the source untouched when it already matches the target size; copy in
-            // that case so the blur source is always its own bitmap (sharp and blurSource are each
-            // recycled independently, so they must never alias the same instance).
-            val scaledBitmap = tempBitmap.scale(scaledWidth, scaledHeight).let { scaled ->
-                if (scaled === sharp) scaled.copy(scaled.config ?: Bitmap.Config.ARGB_8888, false) else scaled
-            }
+            // Downscale in halving steps rather than one big createScaledBitmap: a single
+            // large-factor bilinear scale only samples a 2x2 neighbourhood, so reducing by the
+            // 4-16x blurredSampleSize skips source pixels and bakes in aliasing that a small blur
+            // radius no longer hides. downscaleForBlur always returns its own bitmap (never sharp),
+            // preserving the invariant that sharp and blurSource are independently recyclable.
+            val scaledBitmap = downscaleForBlur(tempBitmap, scaledWidth, scaledHeight)
             // Never recycle the shared sharp bitmap here; only a dedicated decode is ours to free.
             if (tempBitmap !== sharp && tempBitmap != scaledBitmap) {
                 tempBitmap.recycle()
@@ -529,6 +529,32 @@ class MuzeiBlurRenderer(
         }
 
         return DecodedArtwork(sharp, blurSource, darkness, bitmapAspectRatio, width, height)
+    }
+
+    /**
+     * Downscales [source] to [targetWidth] x [targetHeight] by repeated halving so each step is at
+     * most a 2x reduction, which bilinear filtering handles without skipping pixels. Doing the whole
+     * 4-16x reduction in one createScaledBitmap would sample only a 2x2 neighbourhood per output
+     * pixel and alias; halving averages the intermediate pixels (mip-style) so the blur source is
+     * alias-free at any radius. Never recycles [source]; always returns a distinct new bitmap.
+     */
+    private fun downscaleForBlur(source: Bitmap, targetWidth: Int, targetHeight: Int): Bitmap {
+        var current = source
+        var currentOwned = false // whether `current` is an intermediate we may recycle
+        while (current.width >= targetWidth * 2 && current.height >= targetHeight * 2) {
+            val next = current.scale(current.width / 2, current.height / 2)
+            if (currentOwned) current.recycle()
+            current = next
+            currentOwned = true
+        }
+        if (current.width == targetWidth && current.height == targetHeight) {
+            // Already exact: hand back the owned intermediate, or a copy so we never return `source`.
+            return if (currentOwned) current
+            else current.copy(current.config ?: Bitmap.Config.ARGB_8888, false)
+        }
+        val scaled = current.scale(targetWidth, targetHeight)
+        if (currentOwned) current.recycle()
+        return scaled
     }
 
     /** Bitmaps decoded off the GL thread, awaiting texture upload (see [decode]/[present]). */
