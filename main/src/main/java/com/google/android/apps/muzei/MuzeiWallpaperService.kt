@@ -174,6 +174,10 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
         // state — surface hidden, or the lock screen (keyguard) hosting (see flushPendingColors).
         private var surfaceVisible = false
         private var lockScreenVisible = false
+        // Whether the screen is on. Video pauses the moment the screen turns off (ACTION_SCREEN_OFF
+        // fires immediately), even though the wallpaper surface can stay "visible" behind an off/AOD
+        // screen; it resumes when the screen comes back on, including to the lock screen.
+        private var screenOn = true
         private var pendingColorsChanged = false
         // The dark-text hint we last published — state for the hint-flip notification gate in
         // updateCurrentArtwork(). We only extract WallpaperColors to drive the status-bar icon
@@ -392,12 +396,17 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
         }
 
         /**
-         * Pause video playback whenever it isn't actually on screen — the surface is hidden (screen
-         * off / AOD / another app) or the lock screen is showing — and resume it only when the home
-         * wallpaper is visible. Images are unaffected (a no-op for them).
+         * Pause video playback while the screen is off (immediately, on screen-off) or the surface
+         * isn't on screen (another app in front); keep it playing whenever the wallpaper is on a
+         * lit screen, including the lock screen. Images are unaffected (a no-op for them).
          */
         private fun updateVideoPlaybackState() {
-            renderController.setVideoPlaybackPaused(!surfaceVisible || lockScreenVisible)
+            renderController.setVideoPlaybackPaused(!surfaceVisible || !screenOn)
+        }
+
+        fun screenStateChanged(isScreenOn: Boolean) {
+            screenOn = isScreenOn
+            updateVideoPlaybackState()
         }
 
         fun lockScreenVisibleChanged(isLockScreenVisible: Boolean) {
@@ -428,8 +437,8 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
             renderController.visible = true
 
             surfaceVisible = visible
-            // Pause video while it isn't actually on screen (hidden surface or lock screen) so it
-            // stops decoding and requesting frames; resume when the home wallpaper is shown.
+            // Pause video while the surface isn't on screen (screen off / another app) so it stops
+            // decoding and requesting frames; it keeps playing on the home and lock screens.
             updateVideoPlaybackState()
             if (!visible) {
                 // Hidden now (screen off / another app) — safe to publish a deferred update.
