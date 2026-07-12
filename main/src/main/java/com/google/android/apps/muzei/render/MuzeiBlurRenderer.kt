@@ -373,6 +373,16 @@ class MuzeiBlurRenderer(
             return
         }
 
+        // Skip recreating the player when the same video is already the settled current artwork.
+        // reloadCurrentArtwork() fires on every surface/size/lifecycle change and always builds a
+        // fresh source, so without this each such event spins up another ExoPlayer for the video
+        // already playing; several coexisting players (each buffering) exhaust the heap.
+        if (source is RenderSource.Video
+                && !loadInProgress && !crossfadeAnimator.isRunning && queuedNextSource == null
+                && currentGLPictureSet.videoUri == source.uri) {
+            return
+        }
+
         if ((loadInProgress || crossfadeAnimator.isRunning) && !immediate) {
             queuedNextSource = source
             return
@@ -457,8 +467,21 @@ class MuzeiBlurRenderer(
             consumeQueuedSource(immediate)
             return
         }
-        nextGLPictureSet.applyVideo(decoded)
-        startCrossfade(decoded.width, decoded.height, immediate)
+        // Build the player now, but hold the crossfade until its first frame is decoded. The player
+        // is created and buffers asynchronously on the main thread, so starting the crossfade here
+        // would fade the outgoing artwork into a blank (black) external texture until playback
+        // catches up — the "goes black before the video appears" flash. onFirstFrame is delivered on
+        // the main thread, so hop back to the GL thread to start the crossfade.
+        val generation = loadGeneration
+        nextGLPictureSet.applyVideo(decoded) {
+            callbacks.queueEventOnGlThread {
+                if (generation != loadGeneration) {
+                    // Superseded by a newer load; that load's own first frame drives its crossfade.
+                    return@queueEventOnGlThread
+                }
+                startCrossfade(decoded.width, decoded.height, immediate)
+            }
+        }
     }
 
     /**
@@ -719,6 +742,10 @@ class MuzeiBlurRenderer(
         // Set instead of sharpPicture/blur when this set holds a video (see applyVideo). Drawn via the
         // same blur/composite machinery, fed each frame by the live video texture.
         private var video: GLVideo? = null
+        // The URI of the video this set is currently playing (null for an image or empty set). Used
+        // to skip recreating an identical player when a surface/size reload re-requests it.
+        var videoUri: Uri? = null
+            private set
         private var hasBitmap = false
         private var bitmapAspectRatio = 1f
         // Artwork luminance; the dim amount is computed from it live (see dimAmountFor).
@@ -749,7 +776,7 @@ class MuzeiBlurRenderer(
          * player) sized for a screen-height sharp capture and a downscaled blur source (matching the
          * image blur source sizing), and points the drawing path at it. Runs on the GL thread.
          */
-        fun applyVideo(decoded: DecodedVideo) {
+        fun applyVideo(decoded: DecodedVideo, onFirstFrame: () -> Unit) {
             destroyPictures()
 
             hasBitmap = true
@@ -775,9 +802,10 @@ class MuzeiBlurRenderer(
             val blurHeight = max(2, (targetHeight / blurredSampleSize).floorEven())
             val blurWidth = max(4, (blurHeight * bitmapAspectRatio).toInt().roundMult4())
 
-            video = GLVideo(context, decoded.uri, sharpWidth, sharpHeight, blurWidth, blurHeight) {
-                callbacks.requestRender()
-            }
+            video = GLVideo(context, decoded.uri, sharpWidth, sharpHeight, blurWidth, blurHeight,
+                    requestRender = { callbacks.requestRender() },
+                    onFirstFrame = onFirstFrame)
+            videoUri = decoded.uri
             // Start paused if the wallpaper isn't currently on screen (e.g. loaded while locked).
             if (videoPaused) {
                 video?.pause()
@@ -920,6 +948,7 @@ class MuzeiBlurRenderer(
             blur = null
             video?.release()
             video = null
+            videoUri = null
         }
 
         /** Pauses/resumes this set's video (if any) — used to stop playback while hidden. */

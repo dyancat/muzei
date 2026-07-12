@@ -29,6 +29,7 @@ import android.view.Surface
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 
 /**
@@ -51,7 +52,12 @@ internal class GLVideo(
         sharpHeight: Int,
         blurWidth: Int,
         blurHeight: Int,
-        private val requestRender: () -> Unit
+        private val requestRender: () -> Unit,
+        // Invoked once, on the main thread, when the first decoded frame becomes available in the
+        // SurfaceTexture. The renderer holds the crossfade until then so it never fades the outgoing
+        // artwork into this video's still-blank (black) external texture before the player has
+        // produced a frame.
+        private val onFirstFrame: () -> Unit
 ) {
     companion object {
         private const val TAG = "GLVideo"
@@ -108,10 +114,48 @@ internal class GLVideo(
                 "  gl_FragColor = c;" +
                 "}"
 
+        // 2x box downsample used by the progressive chain (see renderDownsampleChain). Averages an
+        // explicit 2x2 of source texels via four taps offset by half a source texel, computed in
+        // the vertex shader at highp so the offsets stay exact on large textures. A single
+        // GL_LINEAR tap only box-averages when the reduction lands exactly on 2x; for odd
+        // dimensions it leaves residual aliasing that crawls once the (video) source is in motion.
+        private const val COPY_VERTEX_SHADER = "" +
+                "attribute vec4 aPosition;" +
+                "attribute vec2 aTexCoords;" +
+                "uniform vec2 uHalfTexel;" +   // half a source texel: (0.5/srcW, 0.5/srcH)
+                "varying vec2 vT0;" +
+                "varying vec2 vT1;" +
+                "varying vec2 vT2;" +
+                "varying vec2 vT3;" +
+                "void main(){" +
+                "  vT0 = aTexCoords + vec2(-uHalfTexel.x, -uHalfTexel.y);" +
+                "  vT1 = aTexCoords + vec2( uHalfTexel.x, -uHalfTexel.y);" +
+                "  vT2 = aTexCoords + vec2(-uHalfTexel.x,  uHalfTexel.y);" +
+                "  vT3 = aTexCoords + vec2( uHalfTexel.x,  uHalfTexel.y);" +
+                "  gl_Position = aPosition;" +
+                "}"
+
+        private const val COPY_FRAGMENT_SHADER = "" +
+                "precision highp float;" +
+                "uniform sampler2D uTexture;" +
+                "varying vec2 vT0;" +
+                "varying vec2 vT1;" +
+                "varying vec2 vT2;" +
+                "varying vec2 vT3;" +
+                "void main(){" +
+                "  gl_FragColor = 0.25 * (texture2D(uTexture, vT0) + texture2D(uTexture, vT1)" +
+                "                       + texture2D(uTexture, vT2) + texture2D(uTexture, vT3));" +
+                "}"
+
         // Full-screen quad (NDC), TL, BL, BR, TL, BR, TR.
         private val QUAD_POSITIONS = floatArrayOf(
                 -1f, 1f, 0f,   -1f, -1f, 0f,   1f, -1f, 0f,
                 -1f, 1f, 0f,    1f, -1f, 0f,   1f, 1f, 0f)
+        // Identity texcoords ((pos + 1) / 2) for the downsample copy: a straight 2D->2D scale that
+        // preserves orientation, so the chain's output feeds GLBlur exactly as sharpTexture did.
+        private val COPY_TEXCOORDS = floatArrayOf(
+                0f, 1f,   0f, 0f,   1f, 0f,
+                0f, 1f,   1f, 0f,   1f, 1f)
         // Base texture coordinates (as vec4 s,t,0,1) for the ST-matrix multiply, with the vertical
         // (t) axis flipped relative to QUAD_POSITIONS so the frame captured into the FBO comes out
         // upright for GLBlur's composite pass (which samples top-left origin, see COMPOSITE_TEXCOORDS
@@ -141,6 +185,12 @@ internal class GLVideo(
         private var directAlphaHandle = 0
         private var directGreyHandle = 0
 
+        private var copyProgram = 0
+        private var copyPositionHandle = 0
+        private var copyTexCoordsHandle = 0
+        private var copyTextureHandle = 0
+        private var copyHalfTexelHandle = 0
+
         private var screenWidth = 0
         private var screenHeight = 0
 
@@ -163,6 +213,14 @@ internal class GLVideo(
             directMvpHandle = GLES20.glGetUniformLocation(directProgram, "uMVPMatrix")
             directAlphaHandle = GLES20.glGetUniformLocation(directProgram, "uAlpha")
             directGreyHandle = GLES20.glGetUniformLocation(directProgram, "uGrey")
+
+            copyProgram = GLUtil.createAndLinkProgram(
+                    GLUtil.loadShader(GLES20.GL_VERTEX_SHADER, COPY_VERTEX_SHADER),
+                    GLUtil.loadShader(GLES20.GL_FRAGMENT_SHADER, COPY_FRAGMENT_SHADER), null)
+            copyPositionHandle = GLES20.glGetAttribLocation(copyProgram, "aPosition")
+            copyTexCoordsHandle = GLES20.glGetAttribLocation(copyProgram, "aTexCoords")
+            copyTextureHandle = GLES20.glGetUniformLocation(copyProgram, "uTexture")
+            copyHalfTexelHandle = GLES20.glGetUniformLocation(copyProgram, "uHalfTexel")
         }
 
         /** Records the surface size so a capture pass can restore the viewport (see [GLBlur]). */
@@ -189,7 +247,27 @@ internal class GLVideo(
     private val quadPositions = GLUtil.asFloatBuffer(QUAD_POSITIONS)
     private val texCoords = GLUtil.asFloatBuffer(OES_TEXCOORDS)
     private val directTexCoords = GLUtil.asFloatBuffer(DIRECT_TEXCOORDS)
+    private val copyTexCoords = GLUtil.asFloatBuffer(COPY_TEXCOORDS)
+    // Sizes of the progressive-downsample chain from the sharp capture down to the blur source,
+    // each at most a 2x reduction of the previous; the last is the blur source size.
+    private val downsampleSizes: List<Pair<Int, Int>> = buildList {
+        var w = sharpWidth
+        var h = sharpHeight
+        while (w >= blurWidth * 2 && h >= blurHeight * 2) {
+            w /= 2
+            h /= 2
+            add(w to h)
+        }
+        if (isEmpty() || last() != (blurWidth to blurHeight)) {
+            add(blurWidth to blurHeight)
+        }
+    }
+    private val downsampleFbos = IntArray(downsampleSizes.size)
+    private val downsampleTextures = IntArray(downsampleSizes.size)
     private var released = false
+    // Whether onFirstFrame has already fired; the callback is one-shot (only the first frame gates
+    // the crossfade).
+    private var firstFrameSignaled = false
 
     // ExoPlayer (main thread).
     @Volatile private var player: ExoPlayer? = null
@@ -216,8 +294,15 @@ internal class GLVideo(
         // frames to the surface (a common cause of a black video).
         surfaceTexture.setDefaultBufferSize(sharpWidth, sharpHeight)
         // One render per decoded frame, so the wallpaper renders at exactly the video's source frame
-        // rate (never faster). Delivered on the main thread; it just kicks a render.
-        surfaceTexture.setOnFrameAvailableListener({ requestRender() }, mainHandler)
+        // rate (never faster). Delivered on the main thread; it just kicks a render. The very first
+        // frame also signals the renderer to begin the crossfade (see onFirstFrame).
+        surfaceTexture.setOnFrameAvailableListener({
+            requestRender()
+            if (!firstFrameSignaled) {
+                firstFrameSignaled = true
+                onFirstFrame()
+            }
+        }, mainHandler)
         surface = Surface(surfaceTexture)
 
         // Sharp capture FBO (ordinary 2D texture the blur/composite passes read).
@@ -236,8 +321,28 @@ internal class GLVideo(
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
 
-        // GLBlur reads the sharp texture as its source, downscaling into its blur FBOs.
-        blur.setExternalSource(sharpTexture[0], blurWidth, blurHeight)
+        // Progressive-downsample chain (sharp -> ... -> blur source), each an FBO + 2D texture.
+        GLES20.glGenFramebuffers(downsampleFbos.size, downsampleFbos, 0)
+        GLES20.glGenTextures(downsampleTextures.size, downsampleTextures, 0)
+        for (i in downsampleSizes.indices) {
+            val (w, h) = downsampleSizes[i]
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, downsampleTextures[i])
+            GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, w, h, 0,
+                    GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, downsampleFbos[i])
+            GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
+                    GLES20.GL_TEXTURE_2D, downsampleTextures[i], 0)
+        }
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
+
+        // GLBlur reads the fully-downsampled (prefiltered) source, so its own passes only blur —
+        // they no longer downsample, which is what aliased a small-radius blur.
+        blur.setExternalSource(downsampleTextures.last(), blurWidth, blurHeight)
 
         // Create and start the player on the main thread.
         val appContext = context.applicationContext
@@ -245,7 +350,21 @@ internal class GLVideo(
             if (released) {
                 return@post
             }
-            val exo = ExoPlayer.Builder(appContext).build().apply {
+            // A silent, looping wallpaper clip needs almost no look-ahead, so cap buffering hard.
+            // The default LoadControl buffers up to ~50s, which for a high-bitrate video is ~100MB
+            // of heap per player; with players briefly overlapping during a switch that exhausts the
+            // heap. A ~1-2s buffer keeps it to a few MB.
+            val loadControl = DefaultLoadControl.Builder()
+                    .setBufferDurationsMs(
+                            /* minBufferMs = */ 1_000,
+                            /* maxBufferMs = */ 2_000,
+                            /* bufferForPlaybackMs = */ 250,
+                            /* bufferForPlaybackAfterRebufferMs = */ 500)
+                    .setPrioritizeTimeOverSizeThresholds(true)
+                    .build()
+            val exo = ExoPlayer.Builder(appContext)
+                    .setLoadControl(loadControl)
+                    .build().apply {
                 setVideoSurface(surface)
                 repeatMode = Player.REPEAT_MODE_ONE // seamless loop
                 volume = 0f // wallpapers are silent
@@ -297,6 +416,10 @@ internal class GLVideo(
         GLES20.glDisableVertexAttribArray(texCoordsHandle)
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, 0)
 
+        // Reduce the sharp frame to the blur source in <=2x steps so GLBlur gets a prefiltered
+        // source (blending stays off; these copies fully overwrite their targets).
+        renderDownsampleChain()
+
         // Restore the default framebuffer / full-surface viewport / blending, matching the state
         // GLBlur leaves and the renderer expects for the rest of the frame.
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
@@ -305,6 +428,40 @@ internal class GLVideo(
 
         // The sharp texture content changed, so any cached blur is stale.
         blur.invalidate()
+    }
+
+    /**
+     * Downsamples [sharpTexture] through the [downsampleSizes] chain into [downsampleTextures], each
+     * step at most a 2x GL_LINEAR reduction (a 2x2 average). The last texture — the blur source
+     * GLBlur reads — is thus mip-prefiltered, so a small blur radius no longer reveals the aliasing
+     * that a single large-factor reduction would leave. Assumes blending is already disabled.
+     */
+    private fun renderDownsampleChain() {
+        GLES20.glUseProgram(copyProgram)
+        GLES20.glEnableVertexAttribArray(copyPositionHandle)
+        GLES20.glVertexAttribPointer(copyPositionHandle, 3, GLES20.GL_FLOAT, false, 0, quadPositions)
+        GLES20.glEnableVertexAttribArray(copyTexCoordsHandle)
+        GLES20.glVertexAttribPointer(copyTexCoordsHandle, 2, GLES20.GL_FLOAT, false, 0, copyTexCoords)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glUniform1i(copyTextureHandle, 0)
+        var srcTexture = sharpTexture[0]
+        var srcWidth = sharpWidth
+        var srcHeight = sharpHeight
+        for (i in downsampleSizes.indices) {
+            val (w, h) = downsampleSizes[i]
+            // Half a source texel, so the four taps hit the centres of the 2x2 source block.
+            GLES20.glUniform2f(copyHalfTexelHandle, 0.5f / srcWidth, 0.5f / srcHeight)
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, downsampleFbos[i])
+            GLES20.glViewport(0, 0, w, h)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, srcTexture)
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, VERTICES)
+            srcTexture = downsampleTextures[i]
+            srcWidth = w
+            srcHeight = h
+        }
+        GLES20.glDisableVertexAttribArray(copyPositionHandle)
+        GLES20.glDisableVertexAttribArray(copyTexCoordsHandle)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
     }
 
     /** Draws the external video texture straight to the bound framebuffer (the sharp path). */
@@ -389,6 +546,10 @@ internal class GLVideo(
             blur.destroy()
             GLES20.glDeleteFramebuffers(1, sharpFbo, 0)
             GLES20.glDeleteTextures(1, sharpTexture, 0)
+            if (downsampleFbos.isNotEmpty()) {
+                GLES20.glDeleteFramebuffers(downsampleFbos.size, downsampleFbos, 0)
+                GLES20.glDeleteTextures(downsampleTextures.size, downsampleTextures, 0)
+            }
             GLES20.glDeleteTextures(1, intArrayOf(externalTexture), 0)
         }
     }
