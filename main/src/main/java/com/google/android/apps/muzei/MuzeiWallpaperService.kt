@@ -434,12 +434,13 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
         ) {
             super.onOffsetsChanged(xOffset, yOffset, xOffsetStep, yOffsetStep, xPixelOffset,
                     yPixelOffset)
-            // While the keyguard hosts the wallpaper it pushes a centered offset (0.5). Normally
-            // unseen (RENDERMODE_WHEN_DIRTY → no redraw while locked), but a "next artwork"
-            // crossfade keeps the engine rendering in the background (see onVisibilityChanged),
-            // so the centering would get drawn and snap the viewport to the middle mid-animation.
-            // Keep the last home-screen offset until the launcher is hosting the wallpaper again.
-            if (lockScreenVisible) {
+            // Only the launcher home screen should drive the wallpaper pan. The keyguard and the
+            // in-app screens (art detail, and the Sources/Effects tabs behind it) also host the
+            // wallpaper and push meaningless offsets that would overwrite the home-screen pan and make
+            // it jump — so ignore offsets while either owns the wallpaper, keeping the last home pan.
+            // (xOffset itself is fine at 0 — the left edge — so we gate on who's hosting, not on the
+            // offset or its step; that also honours a single-page launcher, which reports step 0.)
+            if (lockScreenVisible || MuzeiActivityVisible.value) {
                 return
             }
             renderer.setNormalOffsetX(xOffset)

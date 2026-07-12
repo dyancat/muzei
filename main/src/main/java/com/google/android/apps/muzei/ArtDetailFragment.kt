@@ -426,6 +426,9 @@ class ArtDetailFragment : Fragment(R.layout.art_detail_fragment) {
 
     override fun onStart() {
         super.onStart()
+        // Cancel any fling still animating from a previous visit so it can't keep pushing its
+        // edge-clamped viewport over the framing the renderer re-seeds from the launcher crop on open.
+        binding.panScaleProxy.stopAnimation()
         ArtDetailOpen.value = true
     }
 

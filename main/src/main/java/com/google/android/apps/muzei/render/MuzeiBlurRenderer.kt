@@ -135,8 +135,11 @@ class MuzeiBlurRenderer(
 
     private var surfaceCreated: Boolean = false
 
+    // Centered until a scrolling launcher pushes a real offset (see onOffsetsChanged). onOffsetsChanged
+    // is push-only — there's no API to query the current offset — and a non-scrolling launcher never
+    // pushes one, so 0.5 frames the artwork centered rather than hard against the left edge.
     @Volatile
-    private var normalOffsetX: Float = 0f
+    private var normalOffsetX: Float = 0.5f
     @Volatile
     private var zoomAmount: Float = 1f
     private val currentViewport = RectF() // [-1, -1] to [1, 1], flipped
@@ -158,7 +161,7 @@ class MuzeiBlurRenderer(
 
         currentGLPictureSet = GLPictureSet(0)
         nextGLPictureSet = GLPictureSet(1) // for transitioning to next pictures
-        setNormalOffsetX(0f)
+        setNormalOffsetX(0.5f)
         setZoom(1f)
         recomputeMaxPrescaledBlurPixels()
         recomputeMaxDimAmount()
@@ -740,11 +743,13 @@ class MuzeiBlurRenderer(
 
     fun setIsBlurred(isBlurred: Boolean, artDetailMode: Boolean) {
         if (artDetailMode && !isBlurred && !demoMode && !preview) {
-            // Reset art detail viewport
+            // Clear the art-detail framing on open so recomputeTransformMatrices re-seeds it from the
+            // current launcher crop. Opening art detail therefore lands on the launcher position: if a
+            // programmatic pan back to the launcher (a close that's still animating) is in flight, this
+            // jumps straight to its final position instead of reversing toward the abandoned pan.
             ArtDetailViewport.setViewport(0, 0f, 0f, 0f, 0f)
             ArtDetailViewport.setViewport(1, 0f, 0f, 0f, 0f)
         }
-
         blurRelatedToArtDetailMode = artDetailMode
         this.isBlurred = isBlurred
         blurAnimator.start(endValue = if (isBlurred) blurKeyframes else 0) {}

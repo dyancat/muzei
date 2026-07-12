@@ -44,8 +44,13 @@ class PanScaleProxyView @JvmOverloads constructor(context: Context, attrs: Attri
     var relativeAspectRatio = 1f
         set(value) {
             field = value
+            // Re-fit the current viewport to the new aspect, but do NOT fire onViewportChanged:
+            // changing the aspect ratio isn't a user pan/zoom. Firing it here pushed the proxy's
+            // current (possibly stale, e.g. retained from a previous app session) viewport into
+            // ArtDetailViewport as a fake user edit, which clobbered the renderer's reset-to-launcher-
+            // offset on app open and made the wallpaper jump. Genuine pans/flings/zooms still notify
+            // via their own gesture paths.
             constrainViewport()
-            triggerViewportChangedListener()
         }
     var panScaleEnabled = true
 
@@ -354,6 +359,18 @@ class PanScaleProxyView @JvmOverloads constructor(context: Context, attrs: Attri
             removeCallbacks(animateTickRunnable)
             post(animateTickRunnable)
         }
+    }
+
+    /**
+     * Stops any in-flight fling/zoom animation. A running fling keeps ticking setViewportTopLeft and
+     * pushing its (edge-clamped) viewport through onViewportChanged; without this it can outlive the
+     * gesture — e.g. still animating when art detail is left and reopened — and clobber a framing the
+     * renderer has meanwhile reset.
+     */
+    fun stopAnimation() {
+        scroller.forceFinished(true)
+        zoomer.forceFinished(true)
+        handler?.removeCallbacks(animateTickRunnable)
     }
 
     override fun onDetachedFromWindow() {
