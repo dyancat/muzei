@@ -119,12 +119,20 @@ abstract class RenderController(
     }
 
     /**
-     * Pauses or resumes video playback on the GL thread (a no-op for image artwork). The wallpaper
-     * calls this as its surface hides/shows so a video freezes (and stops decoding/redrawing) while
-     * off-screen or on AOD.
+     * Records whether this engine's surface is on screen (on the GL thread). Only the on-screen
+     * engine claims the shared video decoder's output, so a hidden engine's video freezes and stops
+     * redrawing (a no-op for image artwork). Screen on/off is separate (see [setVideoScreenOn]).
      */
-    fun setVideoPlaybackPaused(paused: Boolean) {
-        callbacks.queueEventOnGlThread { renderer.setVideoPaused(paused) }
+    fun setVideoSurfaceVisible(visible: Boolean) {
+        callbacks.queueEventOnGlThread { renderer.setVideoSurfaceVisible(visible) }
+    }
+
+    /**
+     * Sets whether the screen is on. The single shared video decoder pauses the instant the screen
+     * goes off (across every engine), independent of which engine owns its output.
+     */
+    fun setVideoScreenOn(on: Boolean) {
+        SharedVideoPlayer.setScreenOn(on)
     }
 
     protected abstract suspend fun openDownloadedCurrentArtwork(): RenderSource

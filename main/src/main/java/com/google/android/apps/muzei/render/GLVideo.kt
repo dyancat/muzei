@@ -24,26 +24,26 @@ import android.opengl.GLES11Ext
 import android.opengl.GLES20
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
 import android.view.Surface
-import androidx.media3.common.MediaItem
-import androidx.media3.common.PlaybackException
-import androidx.media3.common.Player
-import androidx.media3.exoplayer.DefaultLoadControl
-import androidx.media3.exoplayer.ExoPlayer
+import kotlin.math.roundToInt
 
 /**
  * Plays a video as artwork, mirroring how [GLBlur] renders still images: each frame the live video
- * frame (an external `GL_TEXTURE_EXTERNAL_OES` fed by an [ExoPlayer] through a [SurfaceTexture]) is
+ * frame (an external `GL_TEXTURE_EXTERNAL_OES` fed by a video decoder through a [SurfaceTexture]) is
  * captured into an ordinary 2D FBO — the "sharp" texture — which is then drawn and blurred by the
  * same [GLBlur] composite/blur passes the image path uses. So blur / grey / dim / pan-zoom /
  * crossfade all apply to video exactly as they do to images.
  *
+ * The actual decoding is done by the process-wide [SharedVideoPlayer], not a per-GLVideo player:
+ * every engine (home, lock, preview) has its own [GLVideo] with its own [SurfaceTexture], but they
+ * share one hardware decoder whose output surface is pointed at whichever engine is on screen (see
+ * [bind]/[unbind]). Only that engine receives frames.
+ *
  * Threading: the GL objects (external texture, [SurfaceTexture], FBO, [GLBlur]) are created and used
- * on the GL thread. [ExoPlayer] lives on the main thread (it is not thread-safe); [pause]/[resume]/
- * [release] hop there. New frames arrive via [SurfaceTexture.setOnFrameAvailableListener], which
- * simply asks the renderer to draw again (the renderer is `RENDERMODE_WHEN_DIRTY`), so a paused
- * player produces no frames and therefore no redraws — the battery win on AOD / when hidden.
+ * on the GL thread; the shared player lives on the main thread ([bind]/[unbind]/[release] hop there
+ * inside [SharedVideoPlayer]). New frames arrive via [SurfaceTexture.setOnFrameAvailableListener],
+ * which simply asks the renderer to draw again (the renderer is `RENDERMODE_WHEN_DIRTY`), so an
+ * unbound video produces no frames and therefore no redraws — the battery win on AOD / when hidden.
  */
 internal class GLVideo(
         context: Context,
@@ -52,6 +52,11 @@ internal class GLVideo(
         sharpHeight: Int,
         blurWidth: Int,
         blurHeight: Int,
+        // Fraction of the source video's width to keep, centred. Wide videos are cropped to the
+        // pannable extent (see MuzeiBlurRenderer.MAX_PAN_SCREEN_WIDTHS); the never-rendered outer
+        // columns are discarded before capture so the sharp/downsample/blur textures only ever hold
+        // the strip that can actually be shown. 1f keeps the whole width.
+        captureFraction: Float,
         private val requestRender: () -> Unit,
         // Invoked once, on the main thread, when the first decoded frame becomes available in the
         // SurfaceTexture. The renderer holds the crossfade until then so it never fades the outgoing
@@ -69,10 +74,13 @@ internal class GLVideo(
                 "attribute vec4 aPosition;" +
                 "attribute vec4 aTexCoords;" +
                 "uniform mat4 uSTMatrix;" +
+                "uniform vec2 uCrop;" +   // (scale, offset): keep only the centre uCrop.x of the width
                 "varying vec2 vTexCoords;" +
                 "void main(){" +
                 "  gl_Position = aPosition;" +
-                "  vTexCoords = (uSTMatrix * aTexCoords).xy;" +
+                "  vec4 tc = aTexCoords;" +
+                "  tc.x = tc.x * uCrop.x + uCrop.y;" +
+                "  vTexCoords = (uSTMatrix * tc).xy;" +
                 "}"
 
         private const val OES_FRAGMENT_SHADER = "" +
@@ -91,12 +99,15 @@ internal class GLVideo(
         private const val DIRECT_VERTEX_SHADER = "" +
                 "uniform mat4 uMVPMatrix;" +
                 "uniform mat4 uSTMatrix;" +
+                "uniform vec2 uCrop;" +   // (scale, offset): keep only the centre uCrop.x of the width
                 "attribute vec4 aPosition;" +
                 "attribute vec4 aTexCoords;" +
                 "varying vec2 vTexCoords;" +
                 "void main(){" +
                 "  gl_Position = uMVPMatrix * aPosition;" +
-                "  vTexCoords = (uSTMatrix * aTexCoords).xy;" +
+                "  vec4 tc = aTexCoords;" +
+                "  tc.x = tc.x * uCrop.x + uCrop.y;" +
+                "  vTexCoords = (uSTMatrix * tc).xy;" +
                 "}"
 
         private const val DIRECT_FRAGMENT_SHADER = "" +
@@ -175,6 +186,7 @@ internal class GLVideo(
         private var texCoordsHandle = 0
         private var textureHandle = 0
         private var stMatrixHandle = 0
+        private var cropHandle = 0
 
         private var directProgram = 0
         private var directPositionHandle = 0
@@ -184,6 +196,7 @@ internal class GLVideo(
         private var directMvpHandle = 0
         private var directAlphaHandle = 0
         private var directGreyHandle = 0
+        private var directCropHandle = 0
 
         private var copyProgram = 0
         private var copyPositionHandle = 0
@@ -202,6 +215,7 @@ internal class GLVideo(
             texCoordsHandle = GLES20.glGetAttribLocation(program, "aTexCoords")
             textureHandle = GLES20.glGetUniformLocation(program, "uTexture")
             stMatrixHandle = GLES20.glGetUniformLocation(program, "uSTMatrix")
+            cropHandle = GLES20.glGetUniformLocation(program, "uCrop")
 
             directProgram = GLUtil.createAndLinkProgram(
                     GLUtil.loadShader(GLES20.GL_VERTEX_SHADER, DIRECT_VERTEX_SHADER),
@@ -213,6 +227,7 @@ internal class GLVideo(
             directMvpHandle = GLES20.glGetUniformLocation(directProgram, "uMVPMatrix")
             directAlphaHandle = GLES20.glGetUniformLocation(directProgram, "uAlpha")
             directGreyHandle = GLES20.glGetUniformLocation(directProgram, "uGrey")
+            directCropHandle = GLES20.glGetUniformLocation(directProgram, "uCrop")
 
             copyProgram = GLUtil.createAndLinkProgram(
                     GLUtil.loadShader(GLES20.GL_VERTEX_SHADER, COPY_VERTEX_SHADER),
@@ -241,9 +256,24 @@ internal class GLVideo(
     private val sharpTexture = IntArray(1)
     private val sharpWidth = sharpWidth
     private val sharpHeight = sharpHeight
+    // Centre-crop mapping for the external video texture: keep the middle [captureFraction] of the
+    // width, so tc.x' = tc.x * cropScale + cropOffset.
+    private val cropScale = captureFraction
+    private val cropOffset = (1f - captureFraction) / 2f
+    // The video must decode at full width so the cropped-away columns exist to sample from; only the
+    // centre strip (sharpWidth) is then captured into the FBO/downsample/blur textures.
+    private val decodeWidth =
+            if (captureFraction < 1f) (sharpWidth / captureFraction).roundToInt() else sharpWidth
+    private val blurWidth = blurWidth
+    private val blurHeight = blurHeight
     // Reuses the image blur machinery: its ping-pong FBOs are sized to the downscaled blur source,
     // so pass 1 downsamples the (higher-res) sharp texture into them (see GLBlur.setExternalSource).
     private val blur = GLBlur()
+    // The blur-effect GL objects (sharp FBO, downsample chain, GLBlur FBOs) are allocated on demand
+    // and freed whenever blur is turned off (e.g. a lock screen with blur disabled), so a video shown
+    // without effects holds only its external video texture. Toggled at draw time; see [draw],
+    // [allocateEffects], [freeEffects].
+    private var effectsAllocated = false
     private val quadPositions = GLUtil.asFloatBuffer(QUAD_POSITIONS)
     private val texCoords = GLUtil.asFloatBuffer(OES_TEXCOORDS)
     private val directTexCoords = GLUtil.asFloatBuffer(DIRECT_TEXCOORDS)
@@ -269,9 +299,7 @@ internal class GLVideo(
     // the crossfade).
     private var firstFrameSignaled = false
 
-    // ExoPlayer (main thread).
-    @Volatile private var player: ExoPlayer? = null
-    private var playWhenReady = true
+    private val appContext = context.applicationContext
 
     init {
         // External OES texture backing the SurfaceTexture.
@@ -292,7 +320,7 @@ internal class GLVideo(
         surfaceTexture = SurfaceTexture(externalTexture)
         // Off-screen SurfaceTextures need an explicit buffer size or some devices/codecs deliver no
         // frames to the surface (a common cause of a black video).
-        surfaceTexture.setDefaultBufferSize(sharpWidth, sharpHeight)
+        surfaceTexture.setDefaultBufferSize(decodeWidth, sharpHeight)
         // One render per decoded frame, so the wallpaper renders at exactly the video's source frame
         // rate (never faster). Delivered on the main thread; it just kicks a render. The very first
         // frame also signals the renderer to begin the crossfade (see onFirstFrame).
@@ -304,6 +332,37 @@ internal class GLVideo(
             }
         }, mainHandler)
         surface = Surface(surfaceTexture)
+
+        // The sharp-capture FBO, downsample chain and GLBlur FBOs are allocated lazily the first time
+        // blur is actually needed (see allocateEffects), so a blur-off video never pays for them.
+
+        // The video is decoded by the process-wide SharedVideoPlayer, not a per-GLVideo ExoPlayer, so
+        // the (up to three) engines share a single hardware decoder. Register as a user of it now; the
+        // engine that is actually on screen claims its output surface via bind().
+        SharedVideoPlayer.retain()
+    }
+
+    /**
+     * Pulls the latest video frame into [sharpTexture] and marks the blur stale. Must run on the GL
+     * thread at the start of a frame that will [draw] this video. A no-op once [released].
+     */
+    fun updateFrame() {
+        if (released) {
+            return
+        }
+        surfaceTexture.updateTexImage()
+        surfaceTexture.getTransformMatrix(stMatrix)
+    }
+
+    /**
+     * Allocates the blur-effect GL objects (sharp capture FBO, progressive-downsample chain, and the
+     * GLBlur ping-pong FBOs) if not already present. Idempotent; call on the GL thread before a
+     * blurred draw. Freed again by [freeEffects] when blur is turned off.
+     */
+    private fun allocateEffects() {
+        if (effectsAllocated) {
+            return
+        }
 
         // Sharp capture FBO (ordinary 2D texture the blur/composite passes read).
         GLES20.glGenFramebuffers(1, sharpFbo, 0)
@@ -344,59 +403,29 @@ internal class GLVideo(
         // they no longer downsample, which is what aliased a small-radius blur.
         blur.setExternalSource(downsampleTextures.last(), blurWidth, blurHeight)
 
-        // Create and start the player on the main thread.
-        val appContext = context.applicationContext
-        mainHandler.post {
-            if (released) {
-                return@post
-            }
-            // A silent, looping wallpaper clip needs almost no look-ahead, so cap buffering hard.
-            // The default LoadControl buffers up to ~50s, which for a high-bitrate video is ~100MB
-            // of heap per player; with players briefly overlapping during a switch that exhausts the
-            // heap. A ~1-2s buffer keeps it to a few MB.
-            val loadControl = DefaultLoadControl.Builder()
-                    .setBufferDurationsMs(
-                            /* minBufferMs = */ 1_000,
-                            /* maxBufferMs = */ 2_000,
-                            /* bufferForPlaybackMs = */ 250,
-                            /* bufferForPlaybackAfterRebufferMs = */ 500)
-                    .setPrioritizeTimeOverSizeThresholds(true)
-                    .build()
-            val exo = ExoPlayer.Builder(appContext)
-                    .setLoadControl(loadControl)
-                    .build().apply {
-                setVideoSurface(surface)
-                repeatMode = Player.REPEAT_MODE_ONE // seamless loop
-                volume = 0f // wallpapers are silent
-                addListener(object : Player.Listener {
-                    override fun onPlayerError(error: PlaybackException) {
-                        Log.e(TAG, "Error playing video $uri: ${error.errorCodeName}", error)
-                    }
-                })
-                setMediaItem(MediaItem.fromUri(uri))
-                prepare()
-                this.playWhenReady = this@GLVideo.playWhenReady
-            }
-            player = exo
-        }
+        effectsAllocated = true
     }
 
-    /**
-     * Pulls the latest video frame into [sharpTexture] and marks the blur stale. Must run on the GL
-     * thread at the start of a frame that will [draw] this video. A no-op once [released].
-     */
-    fun updateFrame() {
-        if (released) {
+    /** Frees everything [allocateEffects] created, reclaiming the effect textures. Idempotent. */
+    private fun freeEffects() {
+        if (!effectsAllocated) {
             return
         }
-        surfaceTexture.updateTexImage()
-        surfaceTexture.getTransformMatrix(stMatrix)
+        blur.destroy()
+        GLES20.glDeleteFramebuffers(1, sharpFbo, 0)
+        GLES20.glDeleteTextures(1, sharpTexture, 0)
+        if (downsampleFbos.isNotEmpty()) {
+            GLES20.glDeleteFramebuffers(downsampleFbos.size, downsampleFbos, 0)
+            GLES20.glDeleteTextures(downsampleTextures.size, downsampleTextures, 0)
+        }
+        effectsAllocated = false
     }
 
     /**
      * Captures the current external frame into [sharpTexture] (a 2D FBO) so the blur passes can read
      * it, and marks the cached blur stale. Only needed when the frame will actually be blurred — the
-     * sharp path draws the external texture straight to screen (see [draw]) and skips this.
+     * sharp path draws the external texture straight to screen (see [draw]) and skips this. Assumes
+     * the effect objects are allocated ([allocateEffects]).
      */
     private fun captureToFbo() {
         GLES20.glDisable(GLES20.GL_BLEND)
@@ -408,6 +437,7 @@ internal class GLVideo(
         GLES20.glEnableVertexAttribArray(texCoordsHandle)
         GLES20.glVertexAttribPointer(texCoordsHandle, 4, GLES20.GL_FLOAT, false, 0, texCoords)
         GLES20.glUniformMatrix4fv(stMatrixHandle, 1, false, stMatrix, 0)
+        GLES20.glUniform2f(cropHandle, cropScale, cropOffset)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glUniform1i(textureHandle, 0)
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, externalTexture)
@@ -475,6 +505,7 @@ internal class GLVideo(
                 directTexCoords)
         GLES20.glUniformMatrix4fv(directMvpHandle, 1, false, mvpMatrix, 0)
         GLES20.glUniformMatrix4fv(directStMatrixHandle, 1, false, stMatrix, 0)
+        GLES20.glUniform2f(directCropHandle, cropScale, cropOffset)
         GLES20.glUniform1f(directAlphaHandle, alpha)
         GLES20.glUniform1f(directGreyHandle, grey)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
@@ -494,13 +525,26 @@ internal class GLVideo(
      *
      * When fully sharp the external texture is drawn straight to screen (one upscale, as crisp as a
      * player); only when blurring do we capture into the FBO the blur reads from.
+     *
+     * [effectsActive] tells whether blur is enabled at all for the current screen (independent of the
+     * momentary [blurWeight], which is also 0 while focused in art-detail). The effect textures are
+     * allocated while it is true and freed while it is false, so a blur-off screen (e.g. a lock
+     * screen with blur disabled) reclaims them and holds only the external video texture.
      */
     fun draw(mvpMatrix: FloatArray, globalAlpha: Float, blurWeight: Float, blurRadiusPx: Float,
-             grey: Float) {
+             grey: Float, effectsActive: Boolean) {
         if (released || globalAlpha <= 0f) {
             return
         }
-        if (blurWeight <= 0f) {
+        // Keep the effect textures allocated only while blur is enabled for this screen; reclaim them
+        // as soon as it is turned off. Driven by the setting, not blurWeight, so briefly focusing in
+        // art-detail (blurWeight 0 with blur still enabled) doesn't churn the allocation.
+        if (effectsActive) {
+            allocateEffects()
+        } else {
+            freeEffects()
+        }
+        if (blurWeight <= 0f || !effectsAllocated) {
             drawExternalDirect(mvpMatrix, globalAlpha, grey)
             return
         }
@@ -513,43 +557,45 @@ internal class GLVideo(
         blur.drawBlurred(mvpMatrix, blurRadiusPx, globalAlpha * blurWeight, grey)
     }
 
-    fun pause() {
-        mainHandler.post { player?.playWhenReady = false }
-        playWhenReady = false
+    /**
+     * Claims the shared decoder's output for this video's engine: the [SharedVideoPlayer] loads this
+     * video's [uri] (if not already) and renders into this [surface]. Called when this video's engine
+     * becomes the on-screen one (see MuzeiBlurRenderer.updateVideoBinding). A no-op once [released].
+     */
+    fun bind() {
+        if (released) {
+            return
+        }
+        SharedVideoPlayer.bind(this, uri, surface, appContext)
     }
 
-    fun resume() {
-        mainHandler.post { player?.playWhenReady = true }
-        playWhenReady = true
+    /** Releases this video's claim on the shared decoder's output (its engine going off screen). */
+    fun unbind() {
+        SharedVideoPlayer.unbind(this)
     }
 
     /**
-     * Releases the player + surface (on the main thread) and the GL objects. Idempotent and safe to
-     * call from any thread: the player release is always posted to the main thread (freeing the
-     * codec — the critical resource), while the GL deletes run only if a GL context is current (i.e.
-     * we're on the GL thread). When called during teardown from the main thread there's no context,
-     * so the GL objects are left for the dying context to reclaim.
+     * Releases the surface (on the main thread), this video's use of the shared player, and the GL
+     * objects. Idempotent and safe to call from any thread: the surface release and the shared-player
+     * release are posted/handled off the GL context, while the GL deletes run only if a GL context is
+     * current (i.e. we're on the GL thread). When called during teardown from the main thread there's
+     * no context, so the GL objects are left for the dying context to reclaim.
      */
     fun release() {
         if (released) {
             return
         }
         released = true
-        val exo = player
-        player = null
+        // Give up the shared decoder's output (if we held it) and drop our reference so it can be
+        // freed once no engine is using a video any more.
+        unbind()
+        SharedVideoPlayer.release()
         mainHandler.post {
-            exo?.release()
             surface.release()
             surfaceTexture.release()
         }
         if (EGL14.eglGetCurrentContext() != EGL14.EGL_NO_CONTEXT) {
-            blur.destroy()
-            GLES20.glDeleteFramebuffers(1, sharpFbo, 0)
-            GLES20.glDeleteTextures(1, sharpTexture, 0)
-            if (downsampleFbos.isNotEmpty()) {
-                GLES20.glDeleteFramebuffers(downsampleFbos.size, downsampleFbos, 0)
-                GLES20.glDeleteTextures(downsampleTextures.size, downsampleTextures, 0)
-            }
+            freeEffects()
             GLES20.glDeleteTextures(1, intArrayOf(externalTexture), 0)
         }
     }
