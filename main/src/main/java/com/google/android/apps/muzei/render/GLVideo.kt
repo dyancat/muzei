@@ -294,7 +294,13 @@ internal class GLVideo(
     }
     private val downsampleFbos = IntArray(downsampleSizes.size)
     private val downsampleTextures = IntArray(downsampleSizes.size)
+    // Whether the player/codec/surface have been torn down (see releasePlayer). Also gates
+    // updateFrame/draw/bind so nothing touches the released surface texture.
     private var released = false
+    // Whether the GL objects have been deleted (see release). Tracked separately from [released] so
+    // releasing the player first on the main thread (releasePlayer) does not stop the later
+    // GL-thread teardown from deleting the GL objects.
+    private var glReleased = false
     // Whether onFirstFrame has already fired; the callback is one-shot (only the first frame gates
     // the crossfade).
     private var firstFrameSignaled = false
@@ -575,13 +581,17 @@ internal class GLVideo(
     }
 
     /**
-     * Releases the surface (on the main thread), this video's use of the shared player, and the GL
-     * objects. Idempotent and safe to call from any thread: the surface release and the shared-player
-     * release are posted/handled off the GL context, while the GL deletes run only if a GL context is
-     * current (i.e. we're on the GL thread). When called during teardown from the main thread there's
-     * no context, so the GL objects are left for the dying context to reclaim.
+     * Releases the player/codec, this video's use of the shared player, and the surface — the
+     * teardown that is safe to run off the GL thread (and should, to free the hardware codec
+     * promptly). Does NOT delete the GL objects; those must be deleted on the GL thread via
+     * [release]. Idempotent, safe to call from any thread.
+     *
+     * Split out from [release] so that releasing the player first on the main thread does not, via
+     * the [released] flag, prevent a subsequent GL-thread [release] from deleting the GL objects —
+     * that ordering is exactly how the in-app renderer detaches (see MuzeiRendererFragment), and
+     * conflating the two leaked every GLVideo's textures/FBOs.
      */
-    fun release() {
+    fun releasePlayer() {
         if (released) {
             return
         }
@@ -594,7 +604,23 @@ internal class GLVideo(
             surface.release()
             surfaceTexture.release()
         }
+    }
+
+    /**
+     * Full teardown: releases the player (via [releasePlayer]) and deletes the GL objects. The GL
+     * deletes run only when a GL context is current (i.e. we're on the GL thread), but are guarded by
+     * their own [glReleased] flag rather than [released], so a prior main-thread [releasePlayer] does
+     * not stop them from running when this is later called on the GL thread. If a context is never
+     * current (teardown straight from the main thread with the GL thread already gone), the objects
+     * are left for the dying context to reclaim. Idempotent.
+     */
+    fun release() {
+        releasePlayer()
+        if (glReleased) {
+            return
+        }
         if (EGL14.eglGetCurrentContext() != EGL14.EGL_NO_CONTEXT) {
+            glReleased = true
             freeEffects()
             GLES20.glDeleteTextures(1, intArrayOf(externalTexture), 0)
         }

@@ -1008,9 +1008,12 @@ class MuzeiBlurRenderer(
             video?.unbind()
         }
 
-        /** Releases this set's video player (if any). Idempotent; safe off the GL thread. */
+        /**
+         * Releases this set's video player/codec (if any) but leaves its GL objects for the GL-thread
+         * teardown ([destroyPictures]/[destroy]) to delete. Idempotent; safe off the GL thread.
+         */
         fun releaseVideoPlayer() {
-            video?.release()
+            video?.releasePlayer()
         }
     }
 
@@ -1052,9 +1055,10 @@ class MuzeiBlurRenderer(
     }
 
     /**
-     * Releases any video players immediately. Safe to call from the main thread (e.g. the in-app
-     * preview being destroyed) so the codec is freed even if the GL thread exits before running the
-     * queued [destroy] — see GLVideo.release. Idempotent.
+     * Releases any video players/codecs immediately. Safe to call from the main thread (e.g. the
+     * in-app preview being destroyed) so the codec is freed even if the GL thread exits before running
+     * the queued [destroy]. Leaves the GL objects for that queued [destroy] to delete on the GL
+     * thread — see GLVideo.releasePlayer / GLVideo.release. Idempotent.
      */
     fun releaseVideoPlayers() {
         currentGLPictureSet.releaseVideoPlayer()
