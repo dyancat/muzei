@@ -83,11 +83,18 @@ fun ContentResolver.videoMimeType(uri: Uri): String? = try {
 
 /**
  * Extracts a still poster frame from the video at [uri], scaled to roughly [width] x [height] when
- * both are positive (and the platform supports scaled extraction). Used to give video artwork a
- * thumbnail on surfaces that can't play it (DocumentsUI, widgets, notifications). Returns null if
- * the URI isn't a readable video.
+ * both are positive (and the platform supports scaled extraction). [timeUs] selects which frame:
+ * the default of -1 lets the retriever pick a representative frame (for thumbnails on surfaces that
+ * can't play the video — DocumentsUI, widgets, notifications), while 0 pulls the first frame (used
+ * to derive the status-bar icon colour, matching the frame the wallpaper starts on). Returns null
+ * if the URI isn't a readable video.
  */
-fun ContentResolver.videoFrame(uri: Uri, width: Int = 0, height: Int = 0): Bitmap? {
+fun ContentResolver.videoFrame(
+        uri: Uri,
+        width: Int = 0,
+        height: Int = 0,
+        timeUs: Long = -1
+): Bitmap? {
     val retriever = MediaMetadataRetriever()
     return try {
         val opened = openAssetFileDescriptor(uri, "r")?.use { afd ->
@@ -102,10 +109,10 @@ fun ContentResolver.videoFrame(uri: Uri, width: Int = 0, height: Int = 0): Bitma
             null
         } else if (width > 0 && height > 0 &&
                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-            retriever.getScaledFrameAtTime(-1, MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+            retriever.getScaledFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
                     width, height)
         } else {
-            retriever.frameAtTime
+            retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
         }
     } catch (_: Exception) {
         null

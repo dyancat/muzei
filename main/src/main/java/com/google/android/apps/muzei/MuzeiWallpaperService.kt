@@ -46,6 +46,7 @@ import com.google.android.apps.muzei.featuredart.BuildConfig.FEATURED_ART_AUTHOR
 import com.google.android.apps.muzei.notifications.NotificationUpdater
 import com.google.android.apps.muzei.render.ImageLoader
 import com.google.android.apps.muzei.render.relativeLuminance
+import com.google.android.apps.muzei.render.videoFrame
 import com.google.android.apps.muzei.render.MuzeiBlurRenderer
 import com.google.android.apps.muzei.render.RealRenderController
 import com.google.android.apps.muzei.render.RenderController
@@ -286,8 +287,14 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
         private suspend fun updateCurrentArtwork(artwork: Artwork) {
             val stripFraction = statusBarStripFraction()
             currentArtworkColors = withContext(Dispatchers.IO) {
+                // For video artwork, decode returns null (it isn't a still image); fall back to the
+                // video's first frame so video drives the status-bar icon colour the same way images
+                // do. Like images, video is cover-fit with its top aligned to the top of the screen,
+                // so the first frame is what sits under the status bar when playback starts.
                 val image = ImageLoader.decode(
                         contentResolver, artwork.contentUri, COLOR_DECODE_SIZE)
+                        ?: contentResolver.videoFrame(
+                                artwork.contentUri, COLOR_DECODE_SIZE, COLOR_DECODE_SIZE, timeUs = 0)
                         ?: return@withContext null
                 // Derive WallpaperColors — and in particular the HINT_SUPPORTS_DARK_TEXT flag
                 // that drives the status bar icon colour — from just the strip of the artwork
