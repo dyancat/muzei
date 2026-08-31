@@ -21,6 +21,9 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.RectF
+import android.media.MediaMetadataRetriever
+import android.net.Uri
+import android.opengl.EGL14
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.opengl.Matrix
@@ -64,7 +67,12 @@ class MuzeiBlurRenderer(
         private val context: Context,
         private val callbacks: Callbacks,
         private val demoMode: Boolean = false,
-        private val preview: Boolean = false
+        private val preview: Boolean = false,
+        // Whether this renderer's video visibility is driven externally by a wallpaper engine's
+        // onVisibilityChanged (true), or it is a standalone in-app view that is simply always visible
+        // while rendering (false). Controls whether a video starts claiming the shared decoder (see
+        // videoSurfaceVisible).
+        private val videoVisibilityDrivenExternally: Boolean = false
 ) : GLSurfaceView.Renderer {
 
     companion object {
@@ -98,6 +106,12 @@ class MuzeiBlurRenderer(
         // The GPU blur source is a single (non-tiled) texture, so cap its dimensions to stay within
         // the guaranteed GL_MAX_TEXTURE_SIZE.
         private const val MAX_BLUR_SOURCE_DIM = 2048
+
+        // At most this many screenfuls of a wide image/video are ever panned across (2 screenfuls of
+        // home-screen travel minus some parallax); see recomputeTransformMatrices. A wider source is
+        // only ever partially shown, so a video is cropped to this pannable extent before capture
+        // (see GLPictureSet.applyVideo) to avoid storing columns that can never appear on screen.
+        private const val MAX_PAN_SCREEN_WIDTHS = 1.8f
     }
 
     private val blurKeyframes: Int
@@ -125,7 +139,13 @@ class MuzeiBlurRenderer(
     private var nextGLPictureSet: GLPictureSet
     private lateinit var colorOverlay: GLColorOverlay
 
-    private var queuedNextImageLoader: ImageLoader? = null
+    private var queuedNextSource: RenderSource? = null
+    // Whether this engine's surface is on screen. Only the on-screen engine claims the shared video
+    // decoder's output (see SharedVideoPlayer / updateVideoBinding), so a video created while this
+    // engine is hidden (e.g. artwork advancing on the lock engine while you're on home) doesn't grab
+    // the decoder. A standalone in-app view is always visible while rendering; a wallpaper engine
+    // starts hidden and is driven by onVisibilityChanged. GL thread.
+    private var videoSurfaceVisible = !videoVisibilityDrivenExternally
     // The next artwork is decoded and blurred off the GL thread so rendering (e.g. scrolling)
     // stays smooth during a switch; only the texture upload runs on the GL thread. loadInProgress
     // serialises with the crossfade, and loadGeneration discards a decode that's been superseded.
@@ -261,20 +281,22 @@ class MuzeiBlurRenderer(
         GLColorOverlay.initGl()
         GLPicture.initGl()
         GLBlur.initGl()
+        GLVideo.initGl()
 
         colorOverlay = GLColorOverlay()
 
         surfaceCreated = true
-        val loader = queuedNextImageLoader
-        if (loader != null) {
-            queuedNextImageLoader = null
-            setAndConsumeImageLoader(loader)
+        val source = queuedNextSource
+        if (source != null) {
+            queuedNextSource = null
+            setAndConsumeSource(source)
         }
     }
 
     override fun onSurfaceChanged(unused: GL10, width: Int, height: Int) {
         GLES20.glViewport(0, 0, width, height)
         GLBlur.setScreenSize(width, height)
+        GLVideo.setScreenSize(width, height)
         hintViewportSize(width, height)
         if (!demoMode && !preview) {
             // Reset art detail viewports
@@ -359,66 +381,166 @@ class MuzeiBlurRenderer(
         return maxPrescaledBlurPixels * blurInterpolator.getInterpolation(f / blurKeyframes)
     }
 
-    fun setAndConsumeImageLoader(imageLoader: ImageLoader, immediate: Boolean = false) {
+    fun setAndConsumeSource(source: RenderSource, immediate: Boolean = false) {
         if (!surfaceCreated) {
-            queuedNextImageLoader = imageLoader
+            queuedNextSource = source
+            return
+        }
+
+        // Skip recreating the player when the same video is already the settled current artwork.
+        // reloadCurrentArtwork() fires on every surface/size/lifecycle change and always builds a
+        // fresh source, so without this each such event spins up another ExoPlayer for the video
+        // already playing; several coexisting players (each buffering) exhaust the heap.
+        if (source is RenderSource.Video
+                && !loadInProgress && !crossfadeAnimator.isRunning && queuedNextSource == null
+                && currentGLPictureSet.videoUri == source.uri) {
             return
         }
 
         if ((loadInProgress || crossfadeAnimator.isRunning) && !immediate) {
-            queuedNextImageLoader = imageLoader
+            queuedNextSource = source
             return
         }
 
         val generation = ++loadGeneration
-        if (immediate) {
-            // Decode synchronously so the switch is instant (e.g. lock-screen transitions).
-            loadInProgress = false
-            present(decode(imageLoader), immediate = true)
-            return
-        }
-
-        // Decode and blur off the GL thread so rendering stays smooth during the switch; only the
-        // texture upload (in present) runs on the GL thread.
-        loadInProgress = true
-        decodeScope.launch {
-            val decoded = decode(imageLoader)
-            callbacks.queueEventOnGlThread {
-                if (generation != loadGeneration) {
-                    // Superseded by a newer load; throw this one away.
-                    decoded?.recycle()
-                    return@queueEventOnGlThread
+        when (source) {
+            is RenderSource.Image -> {
+                val imageLoader = source.loader
+                if (immediate) {
+                    // Decode synchronously so the switch is instant (e.g. lock-screen transitions).
+                    loadInProgress = false
+                    present(decode(imageLoader), immediate = true)
+                    return
                 }
-                loadInProgress = false
-                present(decoded, immediate = false)
+                // Decode and blur off the GL thread so rendering stays smooth during the switch;
+                // only the texture upload (in present) runs on the GL thread.
+                loadInProgress = true
+                decodeScope.launch {
+                    val decoded = decode(imageLoader)
+                    callbacks.queueEventOnGlThread {
+                        if (generation != loadGeneration) {
+                            // Superseded by a newer load; throw this one away.
+                            decoded?.recycle()
+                            return@queueEventOnGlThread
+                        }
+                        loadInProgress = false
+                        present(decoded, immediate = false)
+                    }
+                }
+            }
+            is RenderSource.Video -> {
+                val uri = source.uri
+                if (immediate) {
+                    loadInProgress = false
+                    presentVideo(decodeVideo(uri), immediate = true)
+                    return
+                }
+                // Probe the video (size + poster darkness) off the GL thread; the GLVideo itself
+                // (external texture + player) is created on the GL thread in presentVideo.
+                loadInProgress = true
+                decodeScope.launch {
+                    val decodedVideo = decodeVideo(uri)
+                    callbacks.queueEventOnGlThread {
+                        if (generation != loadGeneration) {
+                            return@queueEventOnGlThread
+                        }
+                        loadInProgress = false
+                        presentVideo(decodedVideo, immediate = false)
+                    }
+                }
             }
         }
     }
 
     private fun present(decoded: DecodedArtwork?, immediate: Boolean) {
         if (decoded == null) {
+            // This decode produced nothing (e.g. the initial content-URI reload tried to decode a
+            // video as a still). Don't strand a source queued behind it — try that one now.
+            consumeQueuedSource(immediate)
             return
         }
-        if (!surfaceCreated) {
-            // Surface went away while we were decoding.
+        if (!surfaceCreated || !hasGlContext()) {
+            // Surface/context went away while we were decoding (e.g. the in-app preview being torn
+            // down). Uploading a texture now would hit a dead context and crash; skip it.
             decoded.recycle()
+            consumeQueuedSource(immediate)
             return
         }
+        nextGLPictureSet.applyDecoded(decoded)
+        startCrossfade(decoded.width, decoded.height, immediate)
+    }
 
+    private fun presentVideo(decoded: DecodedVideo?, immediate: Boolean) {
+        if (decoded == null) {
+            consumeQueuedSource(immediate)
+            return
+        }
+        if (!surfaceCreated || !hasGlContext()) {
+            // Surface/context went away while we were probing the video; don't build GL objects on
+            // a dead context.
+            consumeQueuedSource(immediate)
+            return
+        }
+        // Build the player now, but hold the crossfade until its first frame is decoded. The player
+        // is created and buffers asynchronously on the main thread, so starting the crossfade here
+        // would fade the outgoing artwork into a blank (black) external texture until playback
+        // catches up — the "goes black before the video appears" flash. onFirstFrame is delivered on
+        // the main thread, so hop back to the GL thread to start the crossfade.
+        val generation = loadGeneration
+        nextGLPictureSet.applyVideo(decoded) {
+            callbacks.queueEventOnGlThread {
+                if (generation != loadGeneration) {
+                    // Superseded by a newer load; that load's own first frame drives its crossfade.
+                    return@queueEventOnGlThread
+                }
+                // Cross-fade using the cropped strip's dimensions (what's actually shown), so the
+                // published aspect ratio matches the pan/zoom/art-detail transforms.
+                startCrossfade(nextGLPictureSet.videoStripWidth, nextGLPictureSet.videoStripHeight,
+                        immediate)
+            }
+        }
+    }
+
+    /**
+     * Whether a live EGL context is current on this (GL) thread. A queued present can run after the
+     * surface/context has been torn down — notably when the in-app preview's [GLTextureView] is
+     * detached — and GL calls (glGenTextures etc.) would then fail; this lets callers skip that work.
+     */
+    private fun hasGlContext(): Boolean =
+            EGL14.eglGetCurrentContext() != EGL14.EGL_NO_CONTEXT
+
+    /**
+     * Consumes any source queued behind an in-flight load (see [queuedNextSource]). Normally the
+     * crossfade-end callback does this, but a load that ends without a crossfade (a null decode, or
+     * a lost surface) must also drain the queue or a queued source is stranded — which stranded the
+     * video behind the initial content-URI image reload on a cold start.
+     */
+    private fun consumeQueuedSource(immediate: Boolean) {
+        val source = queuedNextSource
+        if (source != null) {
+            queuedNextSource = null
+            setAndConsumeSource(source, immediate)
+        }
+    }
+
+    /**
+     * Starts the crossfade from the current picture set to [nextGLPictureSet] (already loaded with
+     * an image or video), publishing the switch state and, on completion, swapping the sets,
+     * destroying the outgoing one, and consuming any queued source. Shared by [present]/[presentVideo].
+     */
+    private fun startCrossfade(width: Int, height: Int, immediate: Boolean) {
         if (immediate) {
-            // Stop any running cross fade if we're immediately switching to this new image
+            // Stop any running cross fade if we're immediately switching to this new artwork
             crossfadeAnimator.finish()
         }
 
         if (!demoMode && !preview) {
             SwitchingPhotosStateFlow.value = SwitchingPhotosInProgress(nextGLPictureSet.id)
-            ArtworkSizeStateFlow.value = ArtworkSize(decoded.width, decoded.height)
+            ArtworkSizeStateFlow.value = ArtworkSize(width, height)
             ArtDetailViewport.setDefaultViewport(nextGLPictureSet.id,
-                    decoded.width * 1f / decoded.height,
+                    width * 1f / height,
                     aspectRatio)
         }
-
-        nextGLPictureSet.applyDecoded(decoded)
 
         crossfadeAnimator.start(if (immediate) 1 else 0, 1) {
             // swap current and next picturesets
@@ -430,11 +552,7 @@ class MuzeiBlurRenderer(
             if (!demoMode) {
                 SwitchingPhotosStateFlow.value = SwitchingPhotosDone(currentGLPictureSet.id)
             }
-            val loader = queuedNextImageLoader
-            if (loader != null) {
-                queuedNextImageLoader = null
-                setAndConsumeImageLoader(loader, immediate)
-            }
+            consumeQueuedSource(immediate)
         }
         callbacks.requestRender()
     }
@@ -577,6 +695,60 @@ class MuzeiBlurRenderer(
         }
     }
 
+    /**
+     * Probes a video [uri] for its display size and a poster-frame darkness, off the GL thread.
+     * Returns null if it can't be read (the caller then leaves the current artwork in place).
+     */
+    private fun decodeVideo(uri: Uri): DecodedVideo? {
+        val retriever = MediaMetadataRetriever()
+        try {
+            val opened = context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { afd ->
+                if (afd.declaredLength >= 0) {
+                    retriever.setDataSource(afd.fileDescriptor, afd.startOffset, afd.declaredLength)
+                } else {
+                    retriever.setDataSource(afd.fileDescriptor)
+                }
+                true
+            } ?: false
+            if (!opened) {
+                return null
+            }
+            val rawWidth = retriever.extractMetadata(
+                    MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+            val rawHeight = retriever.extractMetadata(
+                    MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+            if (rawWidth == 0 || rawHeight == 0) {
+                return null
+            }
+            // Swap dimensions for portrait recordings so the display aspect ratio is correct.
+            val rotation = retriever.extractMetadata(
+                    MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+            val (width, height) = if (rotation == 90 || rotation == 270) {
+                rawHeight to rawWidth
+            } else {
+                rawWidth to rawHeight
+            }
+            // A poster frame gives the dim amount its darkness, matching how images measure it.
+            val poster = retriever.frameAtTime
+            val darkness = poster.darkness()
+            poster?.recycle()
+            return DecodedVideo(uri, width, height, darkness)
+        } catch (e: Exception) {
+            Log.w(TAG, "Unable to read video $uri: ${e.message}")
+            return null
+        } finally {
+            retriever.release()
+        }
+    }
+
+    /** A probed video awaiting GLVideo creation on the GL thread (see [decodeVideo]/[presentVideo]). */
+    private class DecodedVideo(
+            val uri: Uri,
+            val width: Int,
+            val height: Int,
+            val darkness: Float
+    )
+
     private inner class GLPictureSet(val id: Int) {
         private val projectionMatrix = FloatArray(16)
         private val mvpMatrix = FloatArray(16)
@@ -584,6 +756,20 @@ class MuzeiBlurRenderer(
         // GPU blur of the downscaled source, drawn over the sharp picture as the artwork blurs.
         // Null only if the blur source failed to decode.
         private var blur: GLBlur? = null
+        // Set instead of sharpPicture/blur when this set holds a video (see applyVideo). Drawn via the
+        // same blur/composite machinery, fed each frame by the live video texture.
+        private var video: GLVideo? = null
+        // The URI of the video this set is currently playing (null for an image or empty set). Used
+        // to skip recreating an identical player when a surface/size reload re-requests it.
+        var videoUri: Uri? = null
+            private set
+        // Dimensions of the (centre-cropped) strip a video is actually shown as, so the crossfade
+        // publishes the same aspect ratio the pan/zoom/art-detail transforms use (see applyVideo).
+        // Zero for an image or empty set.
+        var videoStripWidth = 0
+            private set
+        var videoStripHeight = 0
+            private set
         private var hasBitmap = false
         private var bitmapAspectRatio = 1f
         // Artwork luminance; the dim amount is computed from it live (see dimAmountFor).
@@ -609,6 +795,69 @@ class MuzeiBlurRenderer(
             callbacks.requestRender()
         }
 
+        /**
+         * Sets this set up to play [decoded] as a video: creates the [GLVideo] (external texture +
+         * player) sized for a screen-height sharp capture and a downscaled blur source (matching the
+         * image blur source sizing), and points the drawing path at it. Runs on the GL thread.
+         */
+        fun applyVideo(decoded: DecodedVideo, onFirstFrame: () -> Unit) {
+            destroyPictures()
+
+            hasBitmap = true
+            val fullAspectRatio = decoded.width * 1f / decoded.height
+            darkness = decoded.darkness
+
+            // A source wider than the pannable extent (see MAX_PAN_SCREEN_WIDTHS) is only ever shown
+            // in part, so crop it to the centre strip that can actually be reached and treat that
+            // strip as the artwork. captureFraction is the fraction of the width kept (1 = no crop);
+            // the outer columns are dropped before capture (see GLVideo) so we never allocate sharp /
+            // downsample / blur textures for pixels that can't appear on screen.
+            val fullScreenWidths = if (aspectRatio > 0f) fullAspectRatio / aspectRatio else 1f
+            val captureFraction = if (fullScreenWidths > MAX_PAN_SCREEN_WIDTHS)
+                MAX_PAN_SCREEN_WIDTHS / fullScreenWidths else 1f
+            bitmapAspectRatio = fullAspectRatio * captureFraction
+
+            val targetHeight = if (currentHeight > 0) currentHeight else decoded.height
+            // The video always decodes at full width (only the centre strip is captured), so size the
+            // frame from the full aspect ratio at ~screen height, then apply the max-texture cap to
+            // the whole frame.
+            var fullHeight = min(decoded.height, targetHeight).coerceAtLeast(2)
+            var fullWidth = max(2, (fullHeight * fullAspectRatio).toInt())
+            // Only downscale if we'd exceed the GPU's max texture size (typically >= 4096). Using the
+            // small blur-source cap here would shrink the sharp capture well below screen resolution
+            // on high-res (e.g. QHD+) displays and make the video look soft.
+            val maxTextureSize = IntArray(1)
+            GLES20.glGetIntegerv(GLES20.GL_MAX_TEXTURE_SIZE, maxTextureSize, 0)
+            val cap = maxTextureSize[0]
+            if (cap > 0 && (fullWidth > cap || fullHeight > cap)) {
+                val downscale = cap.toFloat() / max(fullWidth, fullHeight)
+                fullWidth = max(2, (fullWidth * downscale).toInt())
+                fullHeight = max(2, (fullHeight * downscale).toInt())
+            }
+            // Sharp capture is just the kept strip of the (capped) full frame.
+            val sharpHeight = fullHeight
+            val sharpWidth = max(2, (fullWidth * captureFraction).toInt())
+            // Downscaled blur source, sized like the image blur source so the blur radius matches.
+            val blurHeight = max(2, (targetHeight / blurredSampleSize).floorEven())
+            val blurWidth = max(4, (blurHeight * bitmapAspectRatio).toInt().roundMult4())
+
+            video = GLVideo(context, decoded.uri, sharpWidth, sharpHeight, blurWidth, blurHeight,
+                    captureFraction,
+                    requestRender = { callbacks.requestRender() },
+                    onFirstFrame = onFirstFrame)
+            videoUri = decoded.uri
+            videoStripWidth = sharpWidth
+            videoStripHeight = sharpHeight
+            // Claim the shared decoder's output for this video only if this engine is the one on
+            // screen; otherwise it stays a passive texture until its engine becomes visible (e.g. a
+            // video that advanced on the lock engine while you're on the home screen).
+            if (videoSurfaceVisible) {
+                video?.bind()
+            }
+            recomputeTransformMatrices()
+            callbacks.requestRender()
+        }
+
         fun recomputeTransformMatrices() {
             // Nothing to transform until this set has an image. Avoids recomputing the "next"
             // (empty) picture set on every offset change while scrolling outside a crossfade.
@@ -630,7 +879,7 @@ class MuzeiBlurRenderer(
 
             // At most pan across 1.8 screenfuls (2 screenfuls + some parallax)
             // TODO: if we know the number of home screen pages, use that number here
-            val maxPanScreenWidths = min(1.8f, scaledBitmapToScreenAspectRatio)
+            val maxPanScreenWidths = min(MAX_PAN_SCREEN_WIDTHS, scaledBitmapToScreenAspectRatio)
 
             currentViewport.apply {
                 left = interpolate(-1f, 1f,
@@ -688,7 +937,6 @@ class MuzeiBlurRenderer(
             if (!hasBitmap || globalAlpha <= 0f) {
                 return
             }
-            val sharp = sharpPicture ?: return
 
             Matrix.multiplyMM(mvpMatrix, 0, viewMatrix, 0, modelMatrix, 0)
             Matrix.multiplyMM(mvpMatrix, 0, projectionMatrix, 0, mvpMatrix, 0)
@@ -704,6 +952,19 @@ class MuzeiBlurRenderer(
             val blurMix = (maxPrescaledBlurPixels / BLUR_FADE_IN_PIXELS).coerceIn(0f, 1f)
             val blurWeight = blurFraction * blurMix
 
+            // Video path: pull the latest frame and draw it through the same blur/composite passes.
+            val vid = video
+            if (vid != null) {
+                vid.updateFrame()
+                // blurMix > 0 means blur is enabled for the current screen, so the video keeps (or
+                // allocates) its effect textures; when it's 0 (blur turned off) they are reclaimed.
+                vid.draw(mvpMatrix, globalAlpha, blurWeight,
+                        blurRadiusAtFrame(blurAnimator.currentValue), grey,
+                        effectsActive = blurMix > 0f)
+                return
+            }
+
+            val sharp = sharpPicture ?: return
             val overlay = blur
             if (blurWeight <= 0f || overlay == null) {
                 sharp.draw(mvpMatrix, globalAlpha, grey)
@@ -732,6 +993,27 @@ class MuzeiBlurRenderer(
             sharpPicture = null
             blur?.destroy()
             blur = null
+            video?.release()
+            video = null
+            videoUri = null
+        }
+
+        /** Claims the shared decoder's output for this set's video (if any) — this engine on screen. */
+        fun bindVideo() {
+            video?.bind()
+        }
+
+        /** Releases this set's claim on the shared decoder's output (if any). */
+        fun unbindVideo() {
+            video?.unbind()
+        }
+
+        /**
+         * Releases this set's video player/codec (if any) but leaves its GL objects for the GL-thread
+         * teardown ([destroyPictures]/[destroy]) to delete. Idempotent; safe off the GL thread.
+         */
+        fun releaseVideoPlayer() {
+            video?.releasePlayer()
         }
     }
 
@@ -739,6 +1021,48 @@ class MuzeiBlurRenderer(
         decodeScope.cancel()
         currentGLPictureSet.destroyPictures()
         nextGLPictureSet.destroyPictures()
+    }
+
+    /**
+     * Records whether this engine's surface is on screen and (re)points the shared video decoder's
+     * output accordingly: the on-screen engine's foreground video claims it, hidden engines release
+     * their claim (a no-op for image artwork). Screen on/off is handled globally by
+     * [SharedVideoPlayer.setScreenOn], so this is purely about which engine owns the output. Must run
+     * on the GL thread (it touches the picture sets).
+     */
+    fun setVideoSurfaceVisible(visible: Boolean) {
+        videoSurfaceVisible = visible
+        updateVideoBinding()
+    }
+
+    /**
+     * Binds the foreground video (the incoming one during a load/crossfade, else the current) to the
+     * shared decoder while this engine is on screen, and releases every claim while it isn't. Binding
+     * the incoming video replaces any previous claim, so the outgoing video simply freezes on its
+     * last frame through the crossfade — acceptable for a wallpaper and the price of one shared
+     * decoder.
+     */
+    private fun updateVideoBinding() {
+        if (videoSurfaceVisible) {
+            // The incoming set (during a load/crossfade) is the foreground video; else the current.
+            val foreground = if (nextGLPictureSet.videoUri != null) nextGLPictureSet
+                    else currentGLPictureSet
+            foreground.bindVideo()
+        } else {
+            currentGLPictureSet.unbindVideo()
+            nextGLPictureSet.unbindVideo()
+        }
+    }
+
+    /**
+     * Releases any video players/codecs immediately. Safe to call from the main thread (e.g. the
+     * in-app preview being destroyed) so the codec is freed even if the GL thread exits before running
+     * the queued [destroy]. Leaves the GL objects for that queued [destroy] to delete on the GL
+     * thread — see GLVideo.releasePlayer / GLVideo.release. Idempotent.
+     */
+    fun releaseVideoPlayers() {
+        currentGLPictureSet.releaseVideoPlayer()
+        nextGLPictureSet.releaseVideoPlayer()
     }
 
     fun setIsBlurred(isBlurred: Boolean, artDetailMode: Boolean) {

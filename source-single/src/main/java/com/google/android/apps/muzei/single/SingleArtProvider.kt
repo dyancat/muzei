@@ -53,9 +53,12 @@ class SingleArtProvider : MuzeiArtProvider() {
         suspend fun setArtwork(context: Context, artworkUri: Uri): Boolean {
             val tempFile = writeUriToFile(context, artworkUri, getArtworkFile(context))
             if (tempFile != null) {
+                // Remember the source MIME type (a SAF document URI reports its real media type)
+                // so getArtworkInfo can open the artwork with a matching viewer for images or video.
                 ProviderContract.getProviderClient(context, SINGLE_AUTHORITY).setArtwork(
                         Artwork(getDisplayName(context, artworkUri)
-                                    ?: context.getString(R.string.single_default_artwork_title)))
+                                    ?: context.getString(R.string.single_default_artwork_title),
+                                metadata = context.contentResolver.getType(artworkUri)))
             }
             return tempFile != null
         }
@@ -141,7 +144,9 @@ class SingleArtProvider : MuzeiArtProvider() {
         val context = context ?: return null
         val uri = ContentUris.withAppendedId(contentUri, artwork.id)
         return PendingIntent.getActivity(context, 0, Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, "image/*")
+            // metadata holds the source MIME type (set in setArtwork); fall back to image/* for
+            // artwork saved before it was recorded.
+            setDataAndType(uri, artwork.metadata ?: "image/*")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }, PendingIntent.FLAG_IMMUTABLE)
     }

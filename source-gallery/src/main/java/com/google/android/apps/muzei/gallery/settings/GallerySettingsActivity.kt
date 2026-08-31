@@ -92,7 +92,8 @@ private class GetContentsFromActivityInfo : ActivityResultContract<ActivityInfo,
     private val getMultipleContents = ActivityResultContracts.GetMultipleContents()
 
     override fun createIntent(context: Context, input: ActivityInfo): Intent =
-            getMultipleContents.createIntent(context, "image/*")
+            getMultipleContents.createIntent(context, "*/*")
+                    .putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/*", "video/*"))
                     .setClassName(input.packageName, input.name)
 
     override fun parseResult(resultCode: Int, intent: Intent?): List<Uri> =
@@ -104,7 +105,7 @@ private class ChoosePhotos : ActivityResultContract<Unit, List<Uri>>() {
 
     @SuppressLint("InlinedApi")
     override fun createIntent(context: Context, input: Unit) =
-            openMultipleDocuments.createIntent(context, arrayOf("image/*"))
+            openMultipleDocuments.createIntent(context, arrayOf("image/*", "video/*"))
                     .addCategory(Intent.CATEGORY_OPENABLE)
                     .putExtra(DocumentsContract.EXTRA_EXCLUDE_SELF, true)
 
@@ -523,8 +524,8 @@ class GallerySettingsActivity : ComponentActivity() {
                                 DocumentsContract.Document.COLUMN_MIME_TYPE)
                         if (DocumentsContract.Document.MIME_TYPE_DIR == mimeType) {
                             directories.add(documentId)
-                        } else if (mimeType.startsWith("image/")) {
-                            // Add images to the list
+                        } else if (mimeType.startsWith("image/") || mimeType.startsWith("video/")) {
+                            // Add images and videos to the list
                             images.add(DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId))
                         }
                         if (images.size == maxImages) {

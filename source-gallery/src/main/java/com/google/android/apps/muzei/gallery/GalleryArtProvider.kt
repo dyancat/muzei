@@ -19,9 +19,11 @@ package com.google.android.apps.muzei.gallery
 import android.annotation.SuppressLint
 import android.app.PendingIntent
 import android.content.Intent
+import android.net.Uri
 import androidx.core.net.toUri
 import com.google.android.apps.muzei.api.provider.Artwork
 import com.google.android.apps.muzei.api.provider.MuzeiArtProvider
+import com.google.android.apps.muzei.api.provider.ProviderContract
 import java.io.FileNotFoundException
 import java.io.IOException
 import java.io.InputStream
@@ -30,6 +32,30 @@ class GalleryArtProvider: MuzeiArtProvider() {
     override fun onLoadRequested(initial: Boolean) {
         val context = context ?: return
         GalleryScanWorker.enqueueRescan(context)
+    }
+
+    override fun getType(uri: Uri): String {
+        // Report the artwork's real media type (image/*, video/mp4) by resolving its source URI, so
+        // consumers keying off the type — notably Coil's video-frame decoder for the browse grid —
+        // can render a poster thumbnail for video. Falls back to the default MuzeiArtProvider type.
+        val context = context
+        if (context != null) {
+            try {
+                query(uri, arrayOf(ProviderContract.Artwork.PERSISTENT_URI), null, null, null)
+                        .use { data ->
+                            if (data.moveToFirst()) {
+                                val persistentUri = data.getString(0)
+                                if (!persistentUri.isNullOrEmpty()) {
+                                    context.contentResolver.getType(persistentUri.toUri())
+                                            ?.let { return it }
+                                }
+                            }
+                        }
+            } catch (_: Exception) {
+                // Fall through to the default cursor type.
+            }
+        }
+        return super.getType(uri)
     }
 
     @SuppressLint("Recycle")
@@ -53,8 +79,11 @@ class GalleryArtProvider: MuzeiArtProvider() {
     override fun getArtworkInfo(artwork: Artwork): PendingIntent? {
         val context = context ?: return null
         val uri = artwork.webUri ?: artwork.persistentUri ?: return null
+        // The source URI reports its real media type, so images open in an image viewer and videos
+        // in a video player rather than everything being forced to image/*.
+        val type = context.contentResolver.getType(uri) ?: "image/*"
         return PendingIntent.getActivity(context, 0, Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, "image/*")
+            setDataAndType(uri, type)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         },  PendingIntent.FLAG_IMMUTABLE)
     }

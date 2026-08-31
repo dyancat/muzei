@@ -41,6 +41,7 @@ import com.google.android.apps.muzei.api.internal.getRecentIds
 import com.google.android.apps.muzei.api.provider.MuzeiArtProvider
 import com.google.android.apps.muzei.api.provider.ProviderContract
 import com.google.android.apps.muzei.render.isValidImage
+import com.google.android.apps.muzei.render.videoMimeType
 import com.google.android.apps.muzei.room.Artwork
 import com.google.android.apps.muzei.room.MuzeiDatabase
 import com.google.android.apps.muzei.util.ContentProviderClientCompat
@@ -272,20 +273,28 @@ class ArtworkLoadWorker(
         val providerArtwork = com.google.android.apps.muzei.api.provider.Artwork.fromCursor(data)
         val artworkUri = ContentUris.withAppendedId(contentUri, providerArtwork.id)
         try {
-            client.openInputStream(artworkUri)?.use { inputStream ->
-                if (inputStream.isValidImage()) {
-                    return Artwork(artworkUri).apply {
-                        title = providerArtwork.title
-                        byline = providerArtwork.byline
-                        attribution = providerArtwork.attribution
-                    }
-                } else {
-                    if (BuildConfig.DEBUG) {
-                        Log.w(TAG, "Artwork $artworkUri is not a valid image")
-                    }
-                    // Tell the client that the artwork is invalid
-                    client.call(ProtocolConstants.METHOD_MARK_ARTWORK_INVALID, artworkUri.toString())
+            val isValidImage = client.openInputStream(artworkUri)?.use { inputStream ->
+                inputStream.isValidImage()
+            } ?: false
+            // A still image validates directly; otherwise probe the container for a video track
+            // (isValidImage fails on video, so the fallback is what admits video artwork).
+            val resolvedMimeType = if (isValidImage) {
+                "image/*"
+            } else {
+                applicationContext.contentResolver.videoMimeType(artworkUri)
+            }
+            if (resolvedMimeType != null) {
+                return Artwork(artworkUri).apply {
+                    title = providerArtwork.title
+                    byline = providerArtwork.byline
+                    attribution = providerArtwork.attribution
                 }
+            } else {
+                if (BuildConfig.DEBUG) {
+                    Log.w(TAG, "Artwork $artworkUri is not a valid image or video")
+                }
+                // Tell the client that the artwork is invalid
+                client.call(ProtocolConstants.METHOD_MARK_ARTWORK_INVALID, artworkUri.toString())
             }
         } catch (e: IOException) {
             Log.i(TAG, "Unable to preload artwork $artworkUri: ${e.message}")

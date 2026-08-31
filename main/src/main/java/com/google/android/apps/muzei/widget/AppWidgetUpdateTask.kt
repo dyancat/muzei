@@ -32,6 +32,7 @@ import android.widget.RemoteViews
 import androidx.annotation.LayoutRes
 import androidx.annotation.RequiresApi
 import com.google.android.apps.muzei.render.ImageLoader
+import com.google.android.apps.muzei.render.videoFrame
 import com.google.android.apps.muzei.room.Artwork
 import com.google.android.apps.muzei.room.MuzeiDatabase
 import com.google.android.apps.muzei.room.Provider
@@ -158,7 +159,10 @@ private suspend fun createRemoteViews(
             R.dimen.widget_small_height_breakpoint)
     val image = ImageLoader.decode(
             context.contentResolver, imageUri,
-            widgetWidth, widgetHeight) ?: return null
+            widgetWidth, widgetHeight)
+            // Video artwork can't be decoded as a still; use a poster frame instead.
+            ?: context.contentResolver.videoFrame(imageUri, widgetWidth, widgetHeight)
+            ?: return null
 
     // Even after using sample size to scale an image down, it might be larger than the
     // maximum bitmap memory usage for widgets

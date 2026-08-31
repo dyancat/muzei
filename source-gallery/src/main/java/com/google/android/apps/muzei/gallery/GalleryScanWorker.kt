@@ -239,8 +239,8 @@ class GalleryScanWorker(
                                 DocumentsContract.Document.COLUMN_MIME_TYPE)
                         if (DocumentsContract.Document.MIME_TYPE_DIR == mimeType) {
                             directories.add(documentId)
-                        } else if (mimeType.startsWith("image/")) {
-                            // Add images to the list
+                        } else if (mimeType.startsWith("image/") || mimeType.startsWith("video/")) {
+                            // Add images and videos to the list
                             images.add(DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId))
                         }
                     }

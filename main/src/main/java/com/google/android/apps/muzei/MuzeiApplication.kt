@@ -26,12 +26,26 @@ import androidx.compose.runtime.ExperimentalComposeRuntimeApi
 import androidx.compose.runtime.tooling.ComposeStackTraceMode
 import androidx.core.content.edit
 import androidx.fragment.app.strictmode.FragmentStrictMode
+import coil3.ImageLoader
+import coil3.PlatformContext
+import coil3.SingletonImageLoader
+import coil3.video.VideoFrameDecoder
 import com.google.android.apps.muzei.settings.Prefs
 import com.google.firebase.Firebase
 import com.google.firebase.crashlytics.crashlytics
 import net.nurik.roman.muzei.BuildConfig
 
-class MuzeiApplication : Application(), SharedPreferences.OnSharedPreferenceChangeListener {
+class MuzeiApplication : Application(), SharedPreferences.OnSharedPreferenceChangeListener,
+        SingletonImageLoader.Factory {
+
+    /**
+     * Registers a video-frame decoder so Coil can render a still poster frame for video artwork
+     * (e.g. the gallery chooser grid), which it otherwise can't decode.
+     */
+    override fun newImageLoader(context: PlatformContext): ImageLoader =
+            ImageLoader.Builder(context)
+                    .components { add(VideoFrameDecoder.Factory()) }
+                    .build()
 
     companion object {
         private const val ALWAYS_DARK_KEY = "always_dark"

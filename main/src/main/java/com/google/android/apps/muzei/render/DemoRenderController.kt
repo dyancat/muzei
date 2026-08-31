@@ -80,6 +80,6 @@ class DemoRenderController(
         currentScrollAnimator?.removeAllListeners()
     }
 
-    override suspend fun openDownloadedCurrentArtwork() =
-            AssetImageLoader(context.assets, "starrynight.jpg")
+    override suspend fun openDownloadedCurrentArtwork(): RenderSource =
+            RenderSource.Image(AssetImageLoader(context.assets, "starrynight.jpg"))
 }

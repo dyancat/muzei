@@ -42,10 +42,10 @@ abstract class RenderController(
             field = value
             if (value) {
                 callbacks.queueEventOnGlThread {
-                    val loader = queuedImageLoader
-                    if (loader != null) {
-                        queuedImageLoader = null
-                        renderer.setAndConsumeImageLoader(loader)
+                    val source = queuedSource
+                    if (source != null) {
+                        queuedSource = null
+                        renderer.setAndConsumeSource(source)
                     }
                 }
                 callbacks.requestRender()
@@ -70,7 +70,7 @@ abstract class RenderController(
         }
     private lateinit var coroutineScope: CoroutineScope
     private var destroyed = false
-    private var queuedImageLoader: ImageLoader? = null
+    private var queuedSource: RenderSource? = null
     private val sharedPreferenceChangeListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (onLockScreen) {
             when (key) {
@@ -112,13 +112,30 @@ abstract class RenderController(
     }
 
     override fun onDestroy(owner: LifecycleOwner) {
-        queuedImageLoader = null
+        queuedSource = null
         Prefs.getSharedPreferences(context)
                 .unregisterOnSharedPreferenceChangeListener(sharedPreferenceChangeListener)
         destroyed = true
     }
 
-    protected abstract suspend fun openDownloadedCurrentArtwork(): ImageLoader
+    /**
+     * Records whether this engine's surface is on screen (on the GL thread). Only the on-screen
+     * engine claims the shared video decoder's output, so a hidden engine's video freezes and stops
+     * redrawing (a no-op for image artwork). Screen on/off is separate (see [setVideoScreenOn]).
+     */
+    fun setVideoSurfaceVisible(visible: Boolean) {
+        callbacks.queueEventOnGlThread { renderer.setVideoSurfaceVisible(visible) }
+    }
+
+    /**
+     * Sets whether the screen is on. The single shared video decoder pauses the instant the screen
+     * goes off (across every engine), independent of which engine owns its output.
+     */
+    fun setVideoScreenOn(on: Boolean) {
+        SharedVideoPlayer.setScreenOn(on)
+    }
+
+    protected abstract suspend fun openDownloadedCurrentArtwork(): RenderSource
 
     fun reloadCurrentArtwork(reloadType: ReloadType = ReloadWhenVisible) {
         if (destroyed) {
@@ -126,13 +143,13 @@ abstract class RenderController(
             return
         }
         coroutineScope.launch(Dispatchers.Main) {
-            val imageLoader = openDownloadedCurrentArtwork()
+            val source = openDownloadedCurrentArtwork()
 
             callbacks.queueEventOnGlThread {
                 if (visible || reloadType != ReloadWhenVisible) {
-                    renderer.setAndConsumeImageLoader(imageLoader, reloadType == ReloadImmediate || !visible)
+                    renderer.setAndConsumeSource(source, reloadType == ReloadImmediate || !visible)
                 } else {
-                    queuedImageLoader = imageLoader
+                    queuedSource = source
                 }
             }
         }

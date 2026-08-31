@@ -235,6 +235,9 @@ internal class GLBlur {
     }
 
     private var sourceTexture = 0
+    // Whether we created [sourceTexture] (setSource uploads a bitmap we own) or it belongs to a
+    // caller (setExternalSource, e.g. the live video FBO texture). Only own textures are deleted.
+    private var ownsSource = false
     private var width = 0
     private var height = 0
     private val fbos = IntArray(2)
@@ -245,14 +248,38 @@ internal class GLBlur {
 
     /** Uploads [bitmap] as the blur source and (re)allocates the ping-pong FBOs sized to it. */
     fun setSource(bitmap: Bitmap) {
-        destroy()
-        lastBlurRadius = -1f // new source: the cached blur (if any) is stale
-        width = bitmap.width
-        height = bitmap.height
+        if (bitmap.width == 0 || bitmap.height == 0) {
+            return
+        }
+        allocate(GLUtil.loadTexture(bitmap), ownsSource = true, bitmap.width, bitmap.height)
+    }
+
+    /**
+     * Points the blur at an existing [textureId] the caller owns (e.g. the live video frame captured
+     * into an FBO) and (re)allocates the ping-pong FBOs at [width] x [height] — typically the
+     * downscaled blur-source size, so pass 1 downsamples the (higher-res) source texture into the
+     * first FBO. Call once when the texture/size is set up; call [invalidate] each frame the source
+     * content changes so the next [drawBlurred] reblurs.
+     */
+    fun setExternalSource(textureId: Int, width: Int, height: Int) {
         if (width == 0 || height == 0) {
             return
         }
-        sourceTexture = GLUtil.loadTexture(bitmap)
+        allocate(textureId, ownsSource = false, width, height)
+    }
+
+    /** Forces the next [drawBlurred] to re-run the blur passes (e.g. the video source advanced). */
+    fun invalidate() {
+        lastBlurRadius = -1f
+    }
+
+    private fun allocate(sourceTexture: Int, ownsSource: Boolean, width: Int, height: Int) {
+        destroy()
+        lastBlurRadius = -1f // new source: the cached blur (if any) is stale
+        this.sourceTexture = sourceTexture
+        this.ownsSource = ownsSource
+        this.width = width
+        this.height = height
 
         GLES20.glGenFramebuffers(2, fbos, 0)
         GLES20.glGenTextures(2, fboTextures, 0)
@@ -358,9 +385,43 @@ internal class GLBlur {
         GLES20.glEnable(GLES20.GL_BLEND)
     }
 
+    /**
+     * Composites an arbitrary 2D [textureId] through [mvpMatrix] onto the bound framebuffer at
+     * [alpha], desaturated by [grey] (0..1) — the same composite pass [drawBlurred] uses, but with a
+     * caller-supplied texture. Used to draw the sharp (unblurred) video frame with the same shader
+     * that draws the blurred overlay, so the two layers match exactly.
+     */
+    fun drawTexture(mvpMatrix: FloatArray, textureId: Int, alpha: Float, grey: Float) {
+        if (alpha <= 0f) {
+            return
+        }
+        GLES20.glUseProgram(compositeProgram)
+        GLES20.glEnableVertexAttribArray(compositePositionHandle)
+        GLES20.glVertexAttribPointer(compositePositionHandle, 3, GLES20.GL_FLOAT, false, 0,
+                quadPositions)
+        GLES20.glEnableVertexAttribArray(compositeTexCoordsHandle)
+        GLES20.glVertexAttribPointer(compositeTexCoordsHandle, 2, GLES20.GL_FLOAT, false, 0,
+                compositeTexCoords)
+        GLES20.glUniformMatrix4fv(compositeMvpHandle, 1, false, mvpMatrix, 0)
+        GLES20.glUniform1f(compositeAlphaHandle, alpha)
+        GLES20.glUniform1f(compositeGreyHandle, grey)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glUniform1i(compositeTextureHandle, 0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, VERTICES)
+
+        GLES20.glDisableVertexAttribArray(compositePositionHandle)
+        GLES20.glDisableVertexAttribArray(compositeTexCoordsHandle)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
+    }
+
     fun destroy() {
         if (sourceTexture != 0) {
-            GLES20.glDeleteTextures(1, intArrayOf(sourceTexture), 0)
+            // Only delete the source texture if we created it (setSource); an external source
+            // (setExternalSource) is owned and freed by the caller.
+            if (ownsSource) {
+                GLES20.glDeleteTextures(1, intArrayOf(sourceTexture), 0)
+            }
             sourceTexture = 0
         }
         if (ready) {

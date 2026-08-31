@@ -85,6 +85,25 @@ class GalleryProvider : ContentProvider() {
     }
 
     override fun getType(uri: Uri): String {
+        // For a specific chosen photo, report its real media MIME (e.g. image/jpeg, video/mp4) by
+        // resolving the underlying source URI. This lets consumers that key off the type — notably
+        // Coil's video-frame decoder for chooser thumbnails — tell video from image. Falls back to
+        // the chosen_photos item type for the directory URI or when it can't be resolved.
+        val context = context
+        if (context != null) {
+            try {
+                val id = ContentUris.parseId(uri)
+                val chosenPhoto = GalleryDatabase.getInstance(context).chosenPhotoDao()
+                        .chosenPhotoBlocking(id)
+                if (chosenPhoto != null) {
+                    context.contentResolver.getType(chosenPhoto.uri)?.let { return it }
+                }
+            } catch (_: NumberFormatException) {
+                // Not an item URI (no numeric id); fall through to the directory type.
+            } catch (_: UnsupportedOperationException) {
+                // ContentUris.parseId on a non-hierarchical URI; fall through.
+            }
+        }
         return "vnd.android.cursor.item/vnd.google.android.apps.muzei.gallery.chosen_photos"
     }
 

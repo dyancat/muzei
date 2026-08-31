@@ -40,8 +40,15 @@ class LockscreenObserver(
         override fun onReceive(context: Context, intent: Intent?) {
             when (intent?.action) {
                 Intent.ACTION_USER_PRESENT -> engine.lockScreenVisibleChanged(false)
-                Intent.ACTION_SCREEN_OFF -> engine.lockScreenVisibleChanged(true)
+                Intent.ACTION_SCREEN_OFF -> {
+                    // Pause video the instant the screen goes off, before treating it as lock-screen
+                    // visible (the wallpaper surface can stay "visible" behind an off screen).
+                    engine.screenStateChanged(isScreenOn = false)
+                    engine.lockScreenVisibleChanged(true)
+                }
                 Intent.ACTION_SCREEN_ON -> {
+                    // Resume video when the screen wakes, whether to the lock screen or unlocked.
+                    engine.screenStateChanged(isScreenOn = true)
                     val kgm = context.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
                     if (!kgm.isKeyguardLocked) {
                         engine.lockScreenVisibleChanged(false)

@@ -46,6 +46,7 @@ import com.google.android.apps.muzei.featuredart.BuildConfig.FEATURED_ART_AUTHOR
 import com.google.android.apps.muzei.notifications.NotificationUpdater
 import com.google.android.apps.muzei.render.ImageLoader
 import com.google.android.apps.muzei.render.relativeLuminance
+import com.google.android.apps.muzei.render.videoFrame
 import com.google.android.apps.muzei.render.MuzeiBlurRenderer
 import com.google.android.apps.muzei.render.RealRenderController
 import com.google.android.apps.muzei.render.RenderController
@@ -174,6 +175,10 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
         // state — surface hidden, or the lock screen (keyguard) hosting (see flushPendingColors).
         private var surfaceVisible = false
         private var lockScreenVisible = false
+        // Whether the screen is on. Video pauses the moment the screen turns off (ACTION_SCREEN_OFF
+        // fires immediately), even though the wallpaper surface can stay "visible" behind an off/AOD
+        // screen; it resumes when the screen comes back on, including to the lock screen.
+        private var screenOn = true
         private var pendingColorsChanged = false
         // The dark-text hint we last published — state for the hint-flip notification gate in
         // updateCurrentArtwork(). We only extract WallpaperColors to drive the status-bar icon
@@ -225,7 +230,7 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
             super<GLEngine>.onCreate(surfaceHolder)
 
             renderer = MuzeiBlurRenderer(this@MuzeiWallpaperService, this,
-                    false, isPreview)
+                    false, isPreview, videoVisibilityDrivenExternally = true)
             renderController = RealRenderController(this@MuzeiWallpaperService,
                     renderer, this)
             engineLifecycle.addObserver(renderController)
@@ -282,8 +287,14 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
         private suspend fun updateCurrentArtwork(artwork: Artwork) {
             val stripFraction = statusBarStripFraction()
             currentArtworkColors = withContext(Dispatchers.IO) {
+                // For video artwork, decode returns null (it isn't a still image); fall back to the
+                // video's first frame so video drives the status-bar icon colour the same way images
+                // do. Like images, video is cover-fit with its top aligned to the top of the screen,
+                // so the first frame is what sits under the status bar when playback starts.
                 val image = ImageLoader.decode(
                         contentResolver, artwork.contentUri, COLOR_DECODE_SIZE)
+                        ?: contentResolver.videoFrame(
+                                artwork.contentUri, COLOR_DECODE_SIZE, COLOR_DECODE_SIZE, timeUs = 0)
                         ?: return@withContext null
                 // Derive WallpaperColors — and in particular the HINT_SUPPORTS_DARK_TEXT flag
                 // that drives the status bar icon colour — from just the strip of the artwork
@@ -391,6 +402,17 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
             super<GLEngine>.onDestroy()
         }
 
+        /**
+         * The one shared video decoder (see SharedVideoPlayer) pauses the instant the screen goes
+         * off and resumes when it comes back on — independent of which engine owns its output, and so
+         * fast because the decoder stays warm. Which engine actually shows the video is handled
+         * separately, by surface visibility (see [onVisibilityChanged]). Images are unaffected.
+         */
+        fun screenStateChanged(isScreenOn: Boolean) {
+            screenOn = isScreenOn
+            renderController.setVideoScreenOn(isScreenOn)
+        }
+
         fun lockScreenVisibleChanged(isLockScreenVisible: Boolean) {
             lockScreenVisible = isLockScreenVisible
             if (isLockScreenVisible) {
@@ -418,6 +440,10 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
             renderController.visible = true
 
             surfaceVisible = visible
+            // Only the on-screen engine claims the shared video decoder's output. Handing it to this
+            // engine when it becomes visible (and giving it up when hidden) is what lets the home and
+            // lock engines share a single decoder instead of each running its own.
+            renderController.setVideoSurfaceVisible(visible)
             if (!visible) {
                 // Hidden now (screen off / another app) — safe to publish a deferred update.
                 flushPendingColors()

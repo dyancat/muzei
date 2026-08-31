@@ -17,13 +17,16 @@
 package com.google.android.apps.muzei.render
 
 import android.content.Context
+import androidx.core.os.UserManagerCompat
 import androidx.lifecycle.LifecycleOwner
 import com.google.android.apps.muzei.api.MuzeiContract
 import com.google.android.apps.muzei.room.MuzeiDatabase
 import com.google.android.apps.muzei.room.contentUri
 import com.google.android.apps.muzei.util.collectIn
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.withContext
 
 class RealRenderController(
         context: Context,
@@ -39,7 +42,14 @@ class RealRenderController(
 
     override fun onCreate(owner: LifecycleOwner) {
         super.onCreate(owner)
-        reloadCurrentArtwork()
+        // Direct Boot only: the artwork DB isn't readable while the user is locked, so fall back to
+        // the generic CONTENT_URI (which reads the downloaded file directly). Once unlocked, onStart's
+        // artwork flow loads the specific per-artwork URI; doing both loads the same artwork under two
+        // different URIs, and since the video dedup keys on the raw URI it doesn't skip the second —
+        // producing a video-to-identical-video crossfade. Skip the redundant load when unlocked.
+        if (!UserManagerCompat.isUserUnlocked(context)) {
+            reloadCurrentArtwork()
+        }
     }
 
     override fun onStart(owner: LifecycleOwner) {
@@ -57,6 +67,18 @@ class RealRenderController(
         }
     }
 
-    override suspend fun openDownloadedCurrentArtwork() =
-            ContentUriImageLoader(context.contentResolver, currentArtworkUri)
+    override suspend fun openDownloadedCurrentArtwork(): RenderSource {
+        // The media type isn't stored, so probe the artwork's container each reload to tell video
+        // from a still image. videoMimeType opens the file and runs MediaMetadataRetriever, so keep
+        // it off the main thread.
+        val uri = currentArtworkUri
+        val isVideo = withContext(Dispatchers.IO) {
+            context.contentResolver.videoMimeType(uri) != null
+        }
+        return if (isVideo) {
+            RenderSource.Video(uri)
+        } else {
+            RenderSource.Image(ContentUriImageLoader(context.contentResolver, uri))
+        }
+    }
 }
